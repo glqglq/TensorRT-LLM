@@ -16,7 +16,6 @@
 
 #include "tensorrt_llm/runtime/iBuffer.h"
 #include "tensorrt_llm/runtime/iTensor.h"
-#include "tensorrt_llm/runtime/tllmBuffers.h"
 
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaUtils.h"
@@ -35,12 +34,11 @@ MemoryType IBuffer::memoryType(void const* data)
     switch (attributes.type)
     {
     case cudaMemoryTypeHost: return MemoryType::kPINNED;
-    case cudaMemoryTypeDevice: return MemoryType::kGPU;
-    case cudaMemoryTypeManaged: return MemoryType::kUVM;
+    case cudaMemoryTypeDevice:
+    case cudaMemoryTypeManaged: return MemoryType::kGPU;
     case cudaMemoryTypeUnregistered: return MemoryType::kCPU;
+    default: TLLM_THROW("Unsupported memory type");
     }
-
-    TLLM_THROW("Unsupported memory type");
 }
 
 IBuffer::UniquePtr IBuffer::slice(IBuffer::SharedPtr buffer, std::size_t offset, std::size_t size)
@@ -107,7 +105,6 @@ char const* IBuffer::getMemoryTypeName() const
     case MemoryType::kPINNED: return MemoryTypeString<MemoryType::kPINNED>::value;
     case MemoryType::kCPU: return MemoryTypeString<MemoryType::kCPU>::value;
     case MemoryType::kGPU: return MemoryTypeString<MemoryType::kGPU>::value;
-    case MemoryType::kUVM: return MemoryTypeString<MemoryType::kUVM>::value;
     }
     TLLM_THROW("Unknown memory type");
 }

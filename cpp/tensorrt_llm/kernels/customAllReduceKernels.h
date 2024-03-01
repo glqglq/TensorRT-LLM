@@ -30,6 +30,7 @@ namespace tensorrt_llm::kernels
 {
 
 constexpr size_t WARP_SIZE = 32;
+constexpr size_t CUSTOM_AR_SIZE_THRESHOLD = 50331648;
 constexpr size_t MAX_ALL_REDUCE_BLOCKS = 24;
 constexpr size_t MAX_RANKS_PER_NODE = 8;
 constexpr size_t DEFAULT_BLOCK_SIZE = 1024;
@@ -43,6 +44,16 @@ enum class AllReduceStrategyType : int8_t
     TWOSHOT = 2,
     AUTO = 3,
 };
+
+#ifdef ENABLE_BF16
+typedef struct bf168
+{
+    __nv_bfloat162 x;
+    __nv_bfloat162 y;
+    __nv_bfloat162 z;
+    __nv_bfloat162 w;
+} bf168;
+#endif
 
 struct AllReduceParams
 {
@@ -64,6 +75,26 @@ template <typename T>
 void invokeOneOrTwoShotAllReduceKernel(AllReduceParams& param, AllReduceStrategyType strat, cudaStream_t stream);
 
 void invokeMultiGpuBarrier(AllReduceParams& param, cudaStream_t stream);
+
+template <typename T>
+struct CustomARCommTypeConverter
+{
+    using Type = uint32_t;
+};
+
+template <>
+struct CustomARCommTypeConverter<half>
+{
+    using Type = uint16_t;
+};
+
+#ifdef ENABLE_BF16
+template <>
+struct CustomARCommTypeConverter<__nv_bfloat16>
+{
+    using Type = __nv_bfloat16;
+};
+#endif
 
 void customAllReduce(kernels::AllReduceParams& params, void* data, size_t elts, size_t size_per_elem,
     common::datatype_enum dataType, AllReduceStrategyType strat, cudaStream_t stream);

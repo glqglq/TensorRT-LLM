@@ -11,11 +11,9 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 
 import numpy as np
 import torch  # pytype: disable=import-error
-from transformers import (AutoModelForSeq2SeqLM, MBartForConditionalGeneration,
-                          VisionEncoderDecoderModel)
+from transformers import AutoModelForSeq2SeqLM, MBartForConditionalGeneration
 
 from tensorrt_llm._utils import str_dtype_to_torch, torch_to_numpy
-from tensorrt_llm.runtime.lora_manager import LoraConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,7 +81,9 @@ def split_and_convert_process(key, val, factor, saved_dir):
             saved_path = saved_dir / f"{saved_key}.{j:d}.bin"
             split_vals[j].tofile(saved_path.as_posix())
 
-    if re.search('norm|embed_positions|(out_proj|fc2)\.bias', key) is not None:
+    if re.search(
+            'model\.shared\.weight|norm|embed_positions|(out_proj|fc2)\.bias',
+            key) is not None:
         saved_path = saved_dir / f"{saved_key}.bin"
         if 'position' in key:
             val = val[2:]  # BART does not use first two position embeddings!
@@ -101,9 +101,8 @@ def split_and_convert_process(key, val, factor, saved_dir):
             val, factor, axis=-1
         )  # no need to split bias, each GPU will add it individually after all reduce
         save_splits(split_vals)  # TODO: support gated activation?
-    elif re.search('(en|de)coder.embed_tokens.weight', key) is not None:
-        saved_path = saved_dir / f"{saved_key}.bin"
-        val.tofile(saved_path.as_posix())
+    elif re.search('lm_head|(en|de)coder.embed_tokens.weight', key) is not None:
+        LOGGER.warning(f"Did not save {key}, using shared.weight directly.")
     elif 'final_logits_bias' in key:  # buffer used to manually control emission prob?
         pass
     else:
@@ -112,110 +111,32 @@ def split_and_convert_process(key, val, factor, saved_dir):
 
 
 def convert_checkpoint(args):
-    # LoRA
-    encoder_hf_modules_to_trtllm_modules = {
-        "q_proj": "attn_q",
-        "v_proj": "attn_v",
-    }  # encoder lora modules on bart
-
-    encoder_trtllm_modules_to_hf_modules = {
-        "attn_q": "q_proj",
-        "attn_v": "v_proj",
-    }
-
-    decoder_hf_modules_to_trtllm_modules = {
-        "q_proj": ["attn_q", "cross_attn_q"],
-        "v_proj": ["attn_v", "cross_attn_v"],
-    }  # decoder lora modules on bart
-
-    decoder_trtllm_modules_to_hf_modules = {
-        "attn_q": "q_proj",
-        "attn_v": "v_proj",
-        "cross_attn_q": "q_proj",
-        "cross_attn_v": "v_proj",
-    }
-
-    encoder_lora_config = LoraConfig.from_hf(
-        args.hf_lora_dir, encoder_hf_modules_to_trtllm_modules,
-        encoder_trtllm_modules_to_hf_modules)
-    decoder_lora_config = LoraConfig.from_hf(
-        args.hf_lora_dir, decoder_hf_modules_to_trtllm_modules,
-        decoder_trtllm_modules_to_hf_modules)
-
-    args.encoder_lora_target_modules = encoder_lora_config.lora_target_modules
-    args.decoder_lora_target_modules = decoder_lora_config.lora_target_modules
-    args.encoder_max_lora_rank = 0
-    args.decoder_max_lora_rank = 0
-    if encoder_lora_config.is_valid:
-        args.encoder_max_lora_rank = encoder_lora_config.adapter_config['r']
-    if decoder_lora_config.is_valid:
-        args.decoder_max_lora_rank = decoder_lora_config.adapter_config['r']
-    # the lora checkpoint might finetune the embedding
-    args.encoder_vocab_size = encoder_lora_config.vocab_size
-    args.decoder_vocab_size = decoder_lora_config.vocab_size
-
-    args.encoder_lora_config = encoder_lora_config
-    args.decoder_lora_config = decoder_lora_config
-
     saved_dir = Path(args.output_dir) / f"tp{args.inference_tensor_para_size}"
     saved_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.nougat:
-        model = VisionEncoderDecoderModel.from_pretrained(args.input_dir)
-        model = model.get_decoder()
-    else:
-        model = AutoModelForSeq2SeqLM.from_pretrained(args.input_dir)
+    model = AutoModelForSeq2SeqLM.from_pretrained(args.input_dir)
     model = model.to(str_dtype_to_torch(args.weight_data_type))
 
     config = configparser.ConfigParser()
+
+    config['encoder'] = dict()
+    for key, val in model.model.encoder.config.to_dict().items():
+        config["encoder"][key] = f"{val}"
+    config["encoder"]["weight_data_type"] = args.weight_data_type
+    config["encoder"]["q_scaling"] = '1'
+
+    # mBART has final layernorm, BART does not
+    config['encoder']['has_model_final_layernorm'] = str(
+        isinstance(model, MBartForConditionalGeneration))
 
     config['decoder'] = dict()
     for key, val in model.model.decoder.config.to_dict().items():
         config["decoder"][key] = f"{val}"
     config["decoder"]["weight_data_type"] = args.weight_data_type
     config["decoder"]["q_scaling"] = '1'
-    config["decoder"]["rescale_before_lm_head"] = str(False)
+    config["decoder"]["rescale_before_lm_head"] = 'false'
     config['decoder']['has_model_final_layernorm'] = str(
-        args.nougat or isinstance(model, MBartForConditionalGeneration))
-    config["decoder"]["max_lora_rank"] = str(args.decoder_max_lora_rank)
-    config["decoder"]["lora_target_modules"] = str(
-        args.decoder_lora_target_modules)
-    config["decoder"]["hf_modules_to_trtllm_modules"] = str(
-        decoder_hf_modules_to_trtllm_modules)
-    config["decoder"]["trtllm_modules_to_hf_modules"] = str(
-        decoder_trtllm_modules_to_hf_modules)
-
-    if args.nougat:
-        # These flags are true for mbart decoders, but missing in HF config
-        config['decoder']['normalize_before'] = str(True)
-        config['decoder']['normalize_embeddings'] = str(True)
-
-        config['encoder'] = dict()
-        # Init few encoder configs, needed by build, from decoder config
-        encoder_config_keys = [
-            "encoder_ffn_dim", "encoder_layers", "encoder_attention_heads",
-            "encoder_layerdrop", "d_model"
-        ]
-        for key in encoder_config_keys:
-            config['encoder'][key] = config['decoder'][key]
-    else:
-        config['encoder'] = dict()
-        for key, val in model.model.encoder.config.to_dict().items():
-            config["encoder"][key] = f"{val}"
-        config["encoder"]["weight_data_type"] = args.weight_data_type
-        config["encoder"]["q_scaling"] = '1'
-
-        # mBART has final layernorm, BART does not
-        config['encoder']['has_model_final_layernorm'] = str(
-            isinstance(model, MBartForConditionalGeneration))
-
-    config["encoder"]["max_lora_rank"] = str(args.encoder_max_lora_rank)
-    config["encoder"]["lora_target_modules"] = str(
-        args.encoder_lora_target_modules)
-    config["encoder"]["hf_modules_to_trtllm_modules"] = str(
-        encoder_hf_modules_to_trtllm_modules)
-    config["encoder"]["trtllm_modules_to_hf_modules"] = str(
-        encoder_trtllm_modules_to_hf_modules)
+        isinstance(model, MBartForConditionalGeneration))
 
     # add additional config
     for key, val in extra_configs.items():
@@ -269,10 +190,6 @@ if __name__ == "__main__":
                         default="float32",
                         choices=["float32", "float16",
                                  "bfloat16"])  # TODO: test support for bf16?
-    parser.add_argument("--hf_lora_dir", type=str, default=None)
-    parser.add_argument("--nougat",
-                        action="store_true",
-                        help="Model which uses vision encoder + mbart decoder")
     parser.add_argument("--verbose",
                         action="store_true",
                         help="Provide verbose messages")

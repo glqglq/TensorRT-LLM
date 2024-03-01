@@ -79,7 +79,7 @@ def run(engine_dir,
     }
 
     # Execute model inference
-    stream = torch.cuda.Stream()
+    stream = torch.cuda.current_stream()
     ok = session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
     assert ok, 'Engine execution failed'
 

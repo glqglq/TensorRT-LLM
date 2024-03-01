@@ -21,6 +21,7 @@
 #include "tensorrt_llm/runtime/iTensor.h"
 
 using namespace tensorrt_llm::runtime;
+namespace tc = tensorrt_llm::common;
 
 TEST(ITensorTest, SqueezeTensor)
 {

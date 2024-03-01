@@ -14,104 +14,102 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
-import platform
-import shutil
+import argparse as _arg
+import pathlib as _pl
+import shutil as _shutil
+import subprocess as _sp
 import sys
-import typing
-from pathlib import Path
+import typing as _tp
+from pathlib import Path as _Path
 
-from build_engines_utils import run_command, wincopy
+import torch.multiprocessing as _mp
 
-resources_dir = Path(
+resources_dir = _pl.Path(
     __file__).parent.parent.parent.parent.parent / "examples/chatglm"
 sys.path.insert(0, str(resources_dir))
 
-engine_target_path = Path(__file__).parent.parent / "models/rt_engine"
+engine_target_path = _pl.Path(__file__).parent.parent / "models/rt_engine"
+
+import build as _ecb
 
 
-def convert_ckpt(model_dir: str, output_dir: str, world_size: int):
-    convert_cmd = [
-        sys.executable,
-        str(resources_dir / "convert_checkpoint.py"), "--dtype=float16",
-        f"--model_dir={model_dir}", f"--output_dir={output_dir}",
-        f"--tp_size={world_size}"
+def build_engine(weight_dir: _pl.Path, engine_dir: _pl.Path, world_size, *args):
+    args = [
+        '--log_level=error',
+        '--model_dir',
+        str(weight_dir),
+        '--output_dir',
+        str(engine_dir),
+        '--max_batch_size=2',
+        '--max_beam_width=2',
+        "--max_input_len=512",
+        "--max_output_len=512",
+        '--builder_opt=0',
+        f'--world_size={world_size}',
+    ] + list(args)
+    print("Running: " + " ".join(args))
+    _ecb.run_build(args)
+
+
+def run_command(command: _tp.Sequence[str], *, cwd=None, **kwargs) -> None:
+
+    command = [str(i) for i in command]
+    print(f"Running: cd %s && %s" %
+          (str(cwd or _pl.Path.cwd()), " ".join(command)))
+    _sp.check_call(command, cwd=cwd, **kwargs)
+
+
+def build_engines(model_cache: _tp.Optional[str] = None, world_size: int = 1):
+
+    model_name_list = ["chatglm_6b", "chatglm2_6b", "chatglm3_6b"]
+    hf_dir_list = [resources_dir / model_name for model_name in model_name_list]
+    trt_dir_list = [
+        resources_dir / ("output_" + model_name)
+        for model_name in model_name_list
     ]
-    print("Running: " + " ".join(convert_cmd))
-    run_command(convert_cmd)
-
-
-def build_engine(ckpt_dir: str, engine_dir: str):
-    build_cmd = [
-        "trtllm-build", f"--checkpoint_dir={ckpt_dir}",
-        f"--output_dir={engine_dir}", "--log_level=error", "--max_batch_size=2",
-        "--max_beam_width=4", "--max_input_len=512", "--max_output_len=512",
-        "--gpt_attention_plugin=float16", "--gemm_plugin=float16",
-        "--builder_opt=0", "--remove_input_padding=disable",
-        "--paged_kv_cache=disable"
-    ]
-    print("Running: " + " ".join(build_cmd))
-    run_command(build_cmd)
-
-
-def build_engines(model_cache: typing.Optional[str] = None,
-                  world_size: int = 1):
-    Path(engine_target_path).mkdir(parents=True, exist_ok=True)
 
     run_command(
         ["pip", "install", "-r",
          str(resources_dir) + "/requirements.txt"],
         cwd=resources_dir)
 
-    for model_name in ["chatglm_6b", "chatglm2_6b", "chatglm3_6b"]:
-        # Get original model
-        model_cache_dir = Path(model_cache) / model_name.replace("_", "-")
-        if model_cache_dir.is_dir():
-            print("Copy model from model_cache")
-            if platform.system() == "Windows":
-                wincopy(source=str(model_cache_dir),
-                        dest=model_name,
-                        isdir=True,
-                        cwd=resources_dir)
-            else:
-                run_command(
-                    ["rsync", "-av", str(model_cache_dir), "."],
-                    cwd=resources_dir)
-            shutil.move(resources_dir / model_name.replace("_", "-"),
-                        resources_dir / model_name)
-        else:
-            print("Clone model from HF")
+    # chatglm needs 4.33.1 in case of tokenizer issues
+    # AttributeError: 'ChatGLMTokenizer' object has no attribute 'sp_tokenizer'. Did you mean: '_tokenize'?
+    run_command(["pip", "install", "--force-reinstall", "transformers==4.33.1"],
+                cwd=resources_dir)
+
+    # Clone the model directory
+    for model_name, hf_dir in zip(model_name_list, hf_dir_list):
+        if not _Path(hf_dir).exists():
             run_command(
                 [
-                    "git", "clone",
-                    f"https://huggingface.co/THUDM/{model_name.replace('_', '-')}",
-                    model_name
+                    "git",
+                    "clone",
+                    "https://huggingface.co/THUDM/" +
+                    model_name.replace("_", "-"),
+                    model_name,
                 ],
                 cwd=resources_dir,
             )
 
-        # Build engines
-        print(f"Building {model_name}")
-        weight_dir = Path(resources_dir) / model_name
-        ckpt_dir = Path(resources_dir) / "trt_ckpt" / model_name
-        trt_dir = Path(resources_dir) / "trt_engines" / model_name
+    print("\nBuilding engines")
+    for model_name, hf_dir, trt_dir in zip(model_name_list, hf_dir_list,
+                                           trt_dir_list):
+        print("Building %s" % model_name)
+        build_engine(hf_dir, trt_dir, world_size)
 
-        # fix remained error in chatglm_6b, hope to remove this in the future
-        if model_name == "chatglm_6b":
-            shutil.copy(
-                Path(resources_dir) / "tokenization_chatglm.py",
-                weight_dir,
-            )
+    if not _Path(engine_target_path).exists():
+        _Path(engine_target_path).mkdir(parents=True, exist_ok=True)
+    for model_name in model_name_list:
+        _shutil.move(
+            _Path(resources_dir) / ("output_" + model_name),
+            engine_target_path / model_name)
 
-        convert_ckpt(weight_dir, ckpt_dir, world_size)
-        build_engine(ckpt_dir, trt_dir)
-        shutil.move(trt_dir, engine_target_path)
-
-    print("Done")
+    print("Done.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = _arg.ArgumentParser()
     parser.add_argument("--model_cache",
                         type=str,
                         help="Directory where models are stored")
@@ -120,5 +118,7 @@ if __name__ == "__main__":
                         type=int,
                         default=1,
                         help='world size, only support tensor parallelism now')
+
+    _mp.set_start_method("spawn")
 
     build_engines(**vars(parser.parse_args()))

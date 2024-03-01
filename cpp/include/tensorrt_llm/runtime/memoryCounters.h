@@ -19,8 +19,8 @@
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/runtime/iBuffer.h"
 
-#include <atomic>
-#include <cstddef>
+#include <algorithm>
+#include <cstdint>
 #include <string>
 
 namespace tensorrt_llm::runtime
@@ -49,11 +49,6 @@ public:
         return mPinned;
     }
 
-    [[nodiscard]] SizeType getUVM() const
-    {
-        return mUVM;
-    }
-
     [[nodiscard]] DiffType getGpuDiff() const
     {
         return mGpuDiff;
@@ -67,11 +62,6 @@ public:
     [[nodiscard]] DiffType getPinnedDiff() const
     {
         return mPinnedDiff;
-    }
-
-    [[nodiscard]] DiffType getUVMDiff() const
-    {
-        return mUVMDiff;
     }
 
     template <MemoryType T>
@@ -93,11 +83,6 @@ public:
             mPinned += size;
             mPinnedDiff = sizeDiff;
         }
-        else if constexpr (T == MemoryType::kUVM)
-        {
-            mUVM += size;
-            mUVMDiff = sizeDiff;
-        }
         else
         {
             TLLM_THROW("Unknown memory type: %s", MemoryTypeString<T>::value);
@@ -112,23 +97,18 @@ public:
         auto const sizeDiff = -static_cast<DiffType>(size);
         if constexpr (T == MemoryType::kGPU)
         {
-            mGpu -= size;
+            mGpu -= std::min(size, mGpu);
             mGpuDiff = sizeDiff;
         }
         else if constexpr (T == MemoryType::kCPU)
         {
-            mCpu -= size;
+            mCpu -= std::min(size, mCpu);
             mCpuDiff = sizeDiff;
         }
         else if constexpr (T == MemoryType::kPINNED)
         {
-            mPinned -= size;
+            mPinned -= std::min(size, mPinned);
             mPinnedDiff = sizeDiff;
-        }
-        else if constexpr (T == MemoryType::kUVM)
-        {
-            mUVM -= size;
-            mUVMDiff = sizeDiff;
         }
         else
         {
@@ -138,17 +118,21 @@ public:
 
     void deallocate(MemoryType memoryType, SizeType size);
 
-    static MemoryCounters& getInstance();
+    static MemoryCounters& getInstance()
+    {
+        return mInstance;
+    }
 
     static std::string bytesToString(SizeType bytes, int precision = 2);
 
     static std::string bytesToString(DiffType bytes, int precision = 2);
 
-    [[nodiscard]] std::string toString() const;
+    std::string toString() const;
 
 private:
-    std::atomic<SizeType> mGpu{}, mCpu{}, mPinned{}, mUVM{};
-    std::atomic<DiffType> mGpuDiff{}, mCpuDiff{}, mPinnedDiff{}, mUVMDiff{};
+    SizeType mGpu{}, mCpu{}, mPinned{};
+    DiffType mGpuDiff{}, mCpuDiff{}, mPinnedDiff{};
+    static thread_local MemoryCounters mInstance;
 };
 
 } // namespace tensorrt_llm::runtime

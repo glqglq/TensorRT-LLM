@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/plugins/api/tllmPlugin.h"
 #include "tensorrt_llm/runtime/gptJsonConfig.h"
@@ -24,13 +23,20 @@
 #include "tensorrt_llm/runtime/tllmLogger.h"
 
 #include <NvInfer.h>
-#include <atomic>
 #include <chrono>
 #include <cxxopts.hpp>
-#include <future>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
+#include <mutex>
+#include <condition_variable>
+#include <semaphore.h>
+
+sem_t semaphore;
+std::mutex mtx;
+std::condition_variable cv;
+bool allThreadsReady = false;
 
 using namespace tensorrt_llm::runtime;
 
@@ -39,27 +45,16 @@ namespace trt = nvinfer1;
 
 namespace
 {
-size_t monitorMemory(std::atomic_bool& done)
-{
-    // A simple memory monitor function that monitors peak GPU memory usage
-    size_t peakMem = 0;
-    while (!done)
-    {
-        auto const [freeMem, totalMem] = tc::getDeviceMemoryInfo(false);
-        if (totalMem - freeMem > peakMem)
-        {
-            peakMem = totalMem - freeMem;
-        }
-        // Sleep for 50 ms to avoid spamming getDeviceMemoryInfo to reduce overhead
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return peakMem;
-}
 
-void benchmarkGptSession(std::string const& modelName, std::filesystem::path const& dataPath,
-    std::vector<int> const& batchSizes, int beamWidth, std::vector<std::vector<int>> const& inOutLen,
-    std::shared_ptr<nvinfer1::ILogger> const& logger, int warmUp, int numRuns, int duration,
-    GptSession::Config& sessionConfig, bool cudaGraphMode, bool printAllLogits, bool disableForceMaxTokens)
+void bench(){
+    sem_wait(&semaphore);
+    std::cout << "gugugugugu\n" << std::endl;
+};
+
+void benchmarkGptSession(std::string const modelName, std::filesystem::path const dataPath,
+    std::vector<int>  batchSizes, const int beamWidth, std::vector<std::vector<int>>  inOutLen,
+    std::shared_ptr<nvinfer1::ILogger> const logger, const int warmUp,const int numRuns,const int duration,
+    GptSession::Config sessionConfig, bool cudaGraphMode, bool printAllLogits, bool disableForceMaxTokens,int rank)
 {
     std::string modelNameHyphen = modelName;
     std::filesystem::path jsonFileName = dataPath / "config.json";
@@ -71,7 +66,6 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
     auto const worldConfig = WorldConfig::mpi(deviceCount, json.getTensorParallelism(), json.getPipelineParallelism());
     auto const enginePath = dataPath / json.engineFilename(worldConfig, modelNameHyphen);
     auto const dtype = modelConfig.getDataType();
-    auto const maxNumTokens = modelConfig.getMaxNumTokens();
     auto const useHalf = (dtype == nvinfer1::DataType::kHALF);
 
     SamplingConfig samplingConfig{beamWidth};
@@ -93,8 +87,7 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
 
         sessionConfig.maxSequenceLength = maxInputLength + maxNewTokens;
         samplingConfig.minLength = std::vector{disableForceMaxTokens ? 1 : maxNewTokens};
-
-        GptSession session{sessionConfig, modelConfig, worldConfig, enginePath.string(), logger};
+        GptSession session{sessionConfig, modelConfig, worldConfig, enginePath.string(), logger, -1};
 
         // Use bufferManager for copying data to and from the GPU
         auto& bufferManager = session.getBufferManager();
@@ -107,17 +100,8 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
 
         for (auto const batchSize : batchSizes)
         {
-            if (inputPacked && maxNumTokens != std::nullopt)
-            {
-                TLLM_CHECK_WITH_INFO(maxBatchSize * maxInputLength <= maxNumTokens.value(),
-                    "The engine is built with remove_input_padding=True and max_num_tokens=%d, while trying to "
-                    "benchmark on %d tokens",
-                    maxNumTokens.value(), maxBatchSize * maxInputLength);
-            }
-            std::atomic_bool done = false;
             try
             {
-                auto peakMemFuture = std::async(&monitorMemory, std::ref(done));
                 TLLM_LOG_INFO(memoryCounter.toString());
 
                 std::vector<SizeType> inputLenghtsHost(batchSize, maxInputLength);
@@ -154,17 +138,6 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
                     bufferManager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32),
                     bufferManager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32)};
 
-                if (session.getModelConfig().computeContextLogits())
-                {
-                    generationOutput.contextLogits
-                        = bufferManager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
-                }
-                if (session.getModelConfig().computeGenerationLogits())
-                {
-                    generationOutput.generationLogits
-                        = bufferManager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
-                }
-
                 TLLM_LOG_INFO(memoryCounter.toString());
 
                 for (auto r = 0; r < warmUp; ++r)
@@ -177,13 +150,11 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
                     bufferManager.getStream().synchronize();
                 }
                 cudaDeviceSynchronize();
-
+                // sem_wait(&semaphore);
                 TLLM_LOG_INFO(memoryCounter.toString());
-
                 int iterIdx = 0;
                 float curDuration = 0;
-                std::vector<float> latencies;
-                while (iterIdx < numRuns || curDuration / 1000 < duration)
+                while (iterIdx < numRuns && curDuration / 1000 < duration)
                 {
                     auto const start = std::chrono::steady_clock::now();
                     SizeType numSteps = 0;
@@ -193,50 +164,22 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
                     session.generate(generationOutput, generationInput, samplingConfig);
                     bufferManager.getStream().synchronize();
                     auto const end = std::chrono::steady_clock::now();
-
                     iterIdx += 1;
-                    float latency = std::chrono::duration<float, std::milli>(end - start).count();
-                    curDuration += latency;
-                    latencies.emplace_back(latency);
+                    curDuration += std::chrono::duration<float, std::milli>(end - start).count();
                 }
 
                 TLLM_LOG_INFO(memoryCounter.toString());
-                done = true;
-                size_t peakMem = peakMemFuture.get();
 
                 printf("Benchmarking done. Iteration: %d, duration: %.2f sec.\n", iterIdx, curDuration / 1000);
-
-                // Print latencies to make it easier to identify perf stability issue.
-                printf("Latencies: [");
-                constexpr int maxPrintedLatencies{20};
-                for (int i = 0; i < latencies.size(); ++i)
-                {
-                    printf("%.2f", latencies[i]);
-                    if (i == latencies.size() - 1)
-                    {
-                        printf("]\n");
-                    }
-                    else if (latencies.size() > maxPrintedLatencies && i == (maxPrintedLatencies / 2 - 1))
-                    {
-                        printf(" ... ");
-                        i = latencies.size() - maxPrintedLatencies / 2;
-                    }
-                    else
-                    {
-                        printf(", ");
-                    }
-                }
 
                 if (worldConfig.getRank() == 0)
                 {
                     auto const averageLatency = curDuration / iterIdx;
                     float const tokensPerSec = batchSize * maxNewTokens / (averageLatency / 1000);
-                    // convert to GB
-                    float const peakMemGB = peakMem / 1e9;
                     printf(
                         "[BENCHMARK] batch_size %d input_length %d output_length %d latency(ms) %.2f tokensPerSec "
-                        "%.2f gpu_peak_mem(gb) %.2f\n",
-                        batchSize, maxInputLength, maxNewTokens, averageLatency, tokensPerSec, peakMemGB);
+                        "%.2f\n",
+                        batchSize, maxInputLength, maxNewTokens, averageLatency, tokensPerSec);
                 }
 
                 // logits are store in last rank
@@ -245,20 +188,21 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
                     if (session.getModelConfig().computeContextLogits() && printAllLogits)
                     {
                         std::cout << "generationOutput.contextLogits.shape: "
-                                  << generationOutput.contextLogits->getShape()
+                                  << generationOutput.contextLogitsHost->getShape()
                                   << std::endl; // (batchsize, prompt_len, vocabsize)
-                        std::cout << "generationOutput.contextLogits: " << *generationOutput.contextLogits << std::endl;
+                        std::cout << "generationOutput.contextLogits: " << *generationOutput.contextLogitsHost
+                                  << std::endl;
                     }
 
                     if (session.getModelConfig().computeGenerationLogits() && printAllLogits)
                     {
                         std::cout << "generationOutput.generationLogits.shape: "
-                                  << generationOutput.generationLogits->getShape()
+                                  << generationOutput.generationLogitsHost->getShape()
                                   << std::endl; // (batchsize, beamwidth, maxNewTokens, vocabsize)
-                        generationOutput.generationLogits->reshape(ITensor::makeShape({batchSize * beamWidth,
+                        generationOutput.generationLogitsHost->reshape(ITensor::makeShape({batchSize * beamWidth,
                             maxNewTokens, modelConfig.getVocabSizePadded(worldConfig.getSize())}));
 
-                        std::cout << "generationOutput.generationLogits: " << *generationOutput.generationLogits
+                        std::cout << "generationOutput.generationLogits: " << *generationOutput.generationLogitsHost
                                   << std::endl;
                     }
                 }
@@ -266,14 +210,11 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
             catch (std::runtime_error& e)
             {
                 std::size_t found = std::string(e.what()).find("out of memory");
-                // We need to kill the memory monitor when OOM.
-                done = true;
 
                 // Unexpected error; rethrow
                 if (found == std::string::npos)
                 {
-                    TLLM_LOG_ERROR(e.what());
-                    throw e;
+                    throw;
                 }
 
                 // We can ignore the OOM exception and continue the rest of the benchmark
@@ -286,13 +227,8 @@ void benchmarkGptSession(std::string const& modelName, std::filesystem::path con
                 }
                 continue;
             }
-            catch (...)
-            {
-                // We need to kill memory monitor when any other issue occurs
-                done = true;
-                throw;
-            }
         }
+        session.printModelLatency();
         TLLM_LOG_INFO(memoryCounter.toString());
     }
 }
@@ -448,18 +384,38 @@ int main(int argc, char* argv[])
     auto printAllLogits = result.count("print_all_logits") > 0;
     auto disableForceMaxTokens = result.count("disable_force_max_tokens") > 0;
 
+    std::string modelName = result["model"].as<std::string>();
+    std::string dataPath = result["engine_dir"].as<std::string>();
     initTrtLlmPlugins(logger.get());
+    // sem_init(&semaphore, 0, 0);
+    // std::thread thread1(benchmarkGptSession,result["model"].as<std::string>(), result["engine_dir"].as<std::string>(), batchSizes,
+    //         beamWidth, inOutLen, logger, result["warm_up"].as<int>(), result["num_runs"].as<int>(),
+    //         result["duration"].as<int>(), sessionConfig, enableCudaGraph, printAllLogits, disableForceMaxTokens,0);
+    // std::thread thread2(benchmarkGptSession,result["model"].as<std::string>(), result["engine_dir"].as<std::string>(), batchSizes,
+    //         beamWidth, inOutLen, logger, result["warm_up"].as<int>(), result["num_runs"].as<int>(),
+    //         result["duration"].as<int>(), sessionConfig, enableCudaGraph, printAllLogits, disableForceMaxTokens,1);
+    // // std::thread thread1(bench);
+    // // std::thread thread2(bench);
+    // sleep(30);
+    auto start = std::chrono::high_resolution_clock::now();
+    // sem_post(&semaphore);
+    // sem_post(&semaphore);
 
     try
     {
         benchmarkGptSession(result["model"].as<std::string>(), result["engine_dir"].as<std::string>(), batchSizes,
             beamWidth, inOutLen, logger, result["warm_up"].as<int>(), result["num_runs"].as<int>(),
-            result["duration"].as<int>(), sessionConfig, enableCudaGraph, printAllLogits, disableForceMaxTokens);
+            result["duration"].as<int>(), sessionConfig, enableCudaGraph, printAllLogits, disableForceMaxTokens,-1);
     }
     catch (const std::exception& e)
     {
         TLLM_LOG_ERROR(e.what());
         return 1;
     }
+    // thread1.join();
+    // thread2.join();
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end - start;
+    std::cout << "代码执行时间: " << duration.count() << " 秒" << std::endl;
     return 0;
 }

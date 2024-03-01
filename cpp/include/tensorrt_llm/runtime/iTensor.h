@@ -30,6 +30,7 @@
 #include <memory>
 #include <numeric>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 

@@ -12,11 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any
+from typing import Any, Union
 
 import numpy as np
 
 from ...layers import ColumnLinear, RowLinear
+from ...models import (BaichuanForCausalLM, BloomForCausalLM, ChatGLMHeadModel,
+                       FalconForCausalLM, GPTJForCausalLM, GPTLMHeadModel,
+                       LLaMAForCausalLM, QWenForCausalLM)
 from ...module import Module
 from ...quantization import QuantMode
 from ...quantization.layers import FP8Linear, FP8RowLinear
@@ -33,7 +36,7 @@ from ...quantization.layers import (SmoothQuantAttention, SmoothQuantGatedMLP,
 
 def _smooth_quantize_gpt(model, quant_mode):
     assert quant_mode.has_act_and_weight_quant()
-    for layer_idx, layer in enumerate(model.layers):
+    for layer in model.layers:
         assert hasattr(layer,
                        "input_layernorm"), "The layer has no input_layernorm"
         layer.input_layernorm = SmoothQuantLayerNorm(
@@ -42,8 +45,7 @@ def _smooth_quantize_gpt(model, quant_mode):
             quant_mode=quant_mode)
         assert hasattr(layer, "attention"), "The layer has no attention"
         layer.attention = SmoothQuantAttention(
-            layer_idx=layer_idx,
-            hidden_size=layer.hidden_size,
+            layer.hidden_size,
             num_attention_heads=layer.num_attention_heads,
             num_kv_heads=layer.attention.num_attention_kv_heads * layer.tp_size,
             max_position_embeddings=layer.max_position_embeddings,
@@ -80,7 +82,7 @@ def _smooth_quantize_gpt(model, quant_mode):
 
 def _smooth_quantize_llama(model, quant_mode):
     assert quant_mode.has_act_and_weight_quant()
-    for layer_idx, layer in enumerate(model.layers):
+    for layer in model.layers:
         assert hasattr(layer,
                        "input_layernorm"), "The layer has no input_layernorm"
         layer.input_layernorm = SmoothQuantRmsNorm(
@@ -89,8 +91,7 @@ def _smooth_quantize_llama(model, quant_mode):
             quant_mode=quant_mode)
         assert hasattr(layer, "attention"), "The layer has no attention"
         layer.attention = SmoothQuantAttention(
-            layer_idx=layer_idx,
-            hidden_size=layer.hidden_size,
+            layer.hidden_size,
             num_attention_heads=layer.num_attention_heads,
             num_kv_heads=layer.num_kv_heads,
             max_position_embeddings=layer.max_position_embeddings,
@@ -129,7 +130,7 @@ def _smooth_quantize_llama(model, quant_mode):
 
 def _smooth_quantize_bloom(model, quant_mode):
     assert quant_mode.has_act_and_weight_quant()
-    for layer_idx, layer in enumerate(model.layers):
+    for layer in model.layers:
         assert hasattr(layer,
                        "input_layernorm"), "The layer has no input_layernorm"
         layer.input_layernorm = SmoothQuantLayerNorm(
@@ -138,8 +139,7 @@ def _smooth_quantize_bloom(model, quant_mode):
             quant_mode=quant_mode)
         assert hasattr(layer, "attention"), "The layer has no attention"
         layer.attention = SmoothQuantAttention(
-            layer_idx=layer_idx,
-            hidden_size=layer.hidden_size,
+            layer.hidden_size,
             num_attention_heads=layer.num_attention_heads,
             max_position_embeddings=layer.max_position_embeddings,
             num_layers=layer.num_layers,
@@ -172,58 +172,13 @@ def _smooth_quantize_bloom(model, quant_mode):
 
 
 def _smooth_quantize_baichuan(model, quant_mode):
-    assert quant_mode.has_act_and_weight_quant()
-    for layer_idx, layer in enumerate(model.layers):
-        assert hasattr(layer,
-                       "input_layernorm"), "The layer has no input_layernorm"
-        layer.input_layernorm = SmoothQuantRmsNorm(
-            normalized_shape=layer.hidden_size,
-            dtype=layer.dtype,
-            quant_mode=quant_mode)
-        assert hasattr(layer, "attention"), "The layer has no attention"
-        layer.attention = SmoothQuantAttention(
-            layer_idx=layer_idx,
-            hidden_size=layer.hidden_size,
-            num_attention_heads=layer.num_attention_heads,
-            num_kv_heads=layer.num_kv_heads,
-            max_position_embeddings=layer.max_position_embeddings,
-            num_layers=model.num_layers,
-            dtype=layer.dtype,
-            attention_mask_type=layer.attention_mask_type,
-            position_embedding_type=layer.position_embedding_type,
-            rotary_embedding_base=layer.attention.rotary_embedding_base,
-            tp_group=layer.tp_group,
-            tp_size=layer.tp_size,
-            tp_rank=layer.tp_rank,
-            quant_mode=quant_mode,
-            bias=layer.attention.qkv.bias is not None)
-
-        assert hasattr(layer, "mlp"), "The layer has no mlp"
-        if hasattr(model, "moe_config"):
-            assert not model.moe_config.has_moe(
-            ), "MOE does not support smooth quant"
-        layer.mlp = SmoothQuantGatedMLP(hidden_size=model.hidden_size,
-                                        ffn_hidden_size=layer.mlp_hidden_size,
-                                        hidden_act=layer.hidden_act,
-                                        dtype=layer.dtype,
-                                        tp_group=layer.tp_group,
-                                        tp_size=layer.tp_size,
-                                        quant_mode=quant_mode,
-                                        bias=layer.mlp.fc.bias is not None)
-        assert hasattr(
-            layer,
-            "post_layernorm"), "The layer has no post_rmspost_layernormnorm"
-        layer.post_layernorm = SmoothQuantRmsNorm(
-            normalized_shape=layer.hidden_size,
-            dtype=layer.dtype,
-            quant_mode=quant_mode)
-
-    return model
+    # Baichuan models' structures are similar to LLaMA so we can reuse the impl
+    return _smooth_quantize_llama(model, quant_mode)
 
 
 def _smooth_quantize_internlm(model, quant_mode):
     assert quant_mode.has_act_and_weight_quant()
-    for layer_idx, layer in enumerate(model.layers):
+    for layer in model.layers:
         assert hasattr(layer,
                        "input_layernorm"), "The layer has no input_layernorm"
         layer.input_layernorm = SmoothQuantRmsNorm(
@@ -232,8 +187,7 @@ def _smooth_quantize_internlm(model, quant_mode):
             quant_mode=quant_mode)
         assert hasattr(layer, "attention"), "The layer has no attention"
         layer.attention = SmoothQuantAttention(
-            layer_idx=layer_idx,
-            hidden_size=layer.hidden_size,
+            layer.hidden_size,
             num_attention_heads=layer.num_attention_heads,
             num_kv_heads=layer.num_kv_heads,
             max_position_embeddings=layer.max_position_embeddings,
@@ -269,16 +223,15 @@ def _smooth_quantize_internlm(model, quant_mode):
 
 def _smooth_quantize_qwen(model, quant_mode):
     assert quant_mode.has_act_and_weight_quant()
-    for layer_idx, layer in enumerate(model.layers):
+    for layer in model.layers:
         assert hasattr(layer, "ln_1"), "The layer has no ln_1"
         layer.ln_1 = SmoothQuantRmsNorm(normalized_shape=layer.hidden_size,
                                         dtype=layer.dtype,
                                         quant_mode=quant_mode)
         assert hasattr(layer, "attention"), "The layer has no attention"
         layer.attention = SmoothQuantAttention(
-            layer_idx=layer_idx,
-            hidden_size=layer.hidden_size,
-            num_attention_heads=layer.num_attention_heads,
+            layer.hidden_size,
+            layer.num_attention_heads,
             max_position_embeddings=layer.max_position_embeddings,
             num_layers=layer.num_layers,
             apply_query_key_layer_scaling=layer.apply_query_key_layer_scaling,
@@ -311,18 +264,16 @@ def _smooth_quantize_qwen(model, quant_mode):
 
 def _smooth_quantize_chatglm(model, quant_mode):
     assert quant_mode.has_act_and_weight_quant()
-    for layer_idx, layer in enumerate(model.layers):
-        assert hasattr(layer,
-                       "input_layernorm"), "The layer has no input_layernorm"
-        layer.input_layernorm = SmoothQuantRmsNorm(
+    for layer in model.layers:
+        assert hasattr(layer, "pre_norm"), "The layer has no pre_norm"
+        layer.pre_norm = SmoothQuantRmsNorm(
             normalized_shape=layer.hidden_size,
             dtype=layer.dtype,
             quant_mode=quant_mode,
         )
         assert hasattr(layer, "attention"), "The layer has no attention"
         layer.attention = SmoothQuantAttention(
-            layer_idx=layer_idx,
-            hidden_size=layer.hidden_size,
+            layer.hidden_size,
             num_attention_heads=layer.num_heads,
             num_kv_heads=layer.num_kv_heads,
             max_position_embeddings=layer.max_seq_length,
@@ -331,12 +282,9 @@ def _smooth_quantize_chatglm(model, quant_mode):
             dtype=layer.dtype,
             attention_mask_type=layer.attention_mask_type,
             position_embedding_type=layer.position_embedding_type,
-            rotary_embedding_base=layer.rotary_embedding_base,
             tp_group=layer.tp_group,
             tp_size=layer.tp_size,
             quant_mode=quant_mode,
-            bias=layer.dense_bias,
-            qkv_bias_only=layer.bias and not layer.dense_bias,
         )
         assert hasattr(layer, "mlp"), "The layer has no mlp"
         layer.mlp = SmoothQuantMLP(
@@ -347,11 +295,9 @@ def _smooth_quantize_chatglm(model, quant_mode):
             tp_group=layer.tp_group,
             tp_size=layer.tp_size,
             quant_mode=quant_mode,
-            bias=layer.dense_bias,
         )
-        assert hasattr(layer,
-                       "post_layernorm"), "The layer has no post_layernorm"
-        layer.post_layernorm = SmoothQuantRmsNorm(
+        assert hasattr(layer, "post_norm"), "The layer has no post_norm"
+        layer.post_norm = SmoothQuantRmsNorm(
             normalized_shape=layer.hidden_size,
             dtype=layer.dtype,
             quant_mode=quant_mode,
@@ -360,12 +306,9 @@ def _smooth_quantize_chatglm(model, quant_mode):
 
 
 def _smooth_quantize(model, quant_mode):
-    from ...models import (BaichuanForCausalLM, BloomForCausalLM,
-                           ChatGLMForCausalLM, GPTLMHeadModel, LLaMAForCausalLM,
-                           QWenForCausalLM)
     assert isinstance(model, GPTLMHeadModel) or isinstance(model, LLaMAForCausalLM) \
             or isinstance(model, BloomForCausalLM) or isinstance(model, BaichuanForCausalLM) \
-            or isinstance(model, QWenForCausalLM) or isinstance(model, ChatGLMForCausalLM), \
+            or isinstance(model, QWenForCausalLM) or isinstance(model, ChatGLMHeadModel), \
             "Only GPTLMHeadModel, LLaMAForCausalLM BloomForCausalLM and BaichuanForCausalLM are well tested now"
     if isinstance(model, GPTLMHeadModel):
         return _smooth_quantize_gpt(model, quant_mode)
@@ -377,7 +320,7 @@ def _smooth_quantize(model, quant_mode):
         return _smooth_quantize_baichuan(model, quant_mode)
     elif isinstance(model, QWenForCausalLM):
         return _smooth_quantize_qwen(model, quant_mode)
-    elif isinstance(model, ChatGLMForCausalLM):
+    elif isinstance(model, ChatGLMHeadModel):
         return _smooth_quantize_chatglm(model, quant_mode)
     else:
         assert False, f"Model {type(model).__name__} is not supported by SmoothQuant yet"
@@ -388,7 +331,6 @@ def _weight_only_groupwise_quantize(model,
                                     group_size=128,
                                     pre_quant_scale=False,
                                     zero=False,
-                                    weight_only_precision="int4_awq",
                                     exclude_modules=None,
                                     current_key_name=None):
     exclude_modules = ['lm_head'
@@ -402,7 +344,6 @@ def _weight_only_groupwise_quantize(model,
         if len(list(module.children())) > 0:
             _weight_only_groupwise_quantize(module, quant_mode, group_size,
                                             pre_quant_scale, zero,
-                                            weight_only_precision,
                                             exclude_modules, current_key_name)
 
         if isinstance(module, ColumnLinear) and name not in exclude_modules:
@@ -415,7 +356,6 @@ def _weight_only_groupwise_quantize(model,
                     pre_quant_scale=pre_quant_scale,
                     zero=zero,
                     bias=module.bias is not None,
-                    use_w4a8_awq=weight_only_precision == 'w4a8_awq',
                     dtype=module.dtype,
                     tp_group=module.tp_group,
                     tp_size=module.tp_size,
@@ -430,7 +370,6 @@ def _weight_only_groupwise_quantize(model,
                     pre_quant_scale=pre_quant_scale,
                     zero=zero,
                     bias=module.bias is not None,
-                    use_w4a8_awq=weight_only_precision == 'w4a8_awq',
                     dtype=module.dtype,
                     tp_group=module.tp_group,
                     tp_size=module.tp_size)
@@ -467,7 +406,7 @@ def get_dummy_quant_scales(num_layers):
         'proj_weights': [0.99 for _ in range(num_layers)],
         'qkv_act': [0.99 for _ in range(num_layers)],
         'qkv_weights': [0.99 for _ in range(num_layers)],
-        'qkv_output': [1.0 for _ in range(num_layers)],
+        'qkv_output': [5.0 for _ in range(num_layers)],
         'dense_act': [0.99 for _ in range(num_layers)],
         'dense_weights': [0.99 for _ in range(num_layers)],
     }
@@ -502,8 +441,10 @@ def _quantize_layer(layer, layer_idx, quant_mode, quant_scales):
     layer.attention.qkv.weights_scaling_factor.value = np.array(
         [quant_scales['qkv_weights'][layer_idx]], dtype=fake_fp8_sf_dt)
     if quant_mode.has_fp8_kv_cache():
-        layer.attention.kv_cache_scaling_factor.value = np.array(
+        layer.attention.kv_orig_quant_scale.value = np.array(
             [quant_scales['qkv_output'][layer_idx]], dtype=fake_fp8_sf_dt)
+        layer.attention.kv_quant_orig_scale.value = np.array(
+            [1.0 / quant_scales['qkv_output'][layer_idx]], dtype=fake_fp8_sf_dt)
     layer.attention.dense.activation_scaling_factor.value = np.array(
         [quant_scales['dense_act'][layer_idx]], dtype=fake_fp8_sf_dt)
     layer.attention.dense.weights_scaling_factor.value = np.array(
@@ -512,7 +453,8 @@ def _quantize_layer(layer, layer_idx, quant_mode, quant_scales):
     return layer
 
 
-def _default_fp8_quantize(model,
+def _default_fp8_quantize(model: Union[GPTLMHeadModel, LLaMAForCausalLM,
+                                       GPTJForCausalLM],
                           quant_mode: QuantMode,
                           quant_scales: dict = None):
     """
@@ -539,8 +481,6 @@ def _default_fp8_quantize(model,
 
 
 def _fp8_quantize(model, quant_mode: QuantMode, quant_scales: dict = None):
-    from ...models import (BaichuanForCausalLM, FalconForCausalLM,
-                           GPTJForCausalLM, GPTLMHeadModel, LLaMAForCausalLM)
     if isinstance(model, (FalconForCausalLM, GPTJForCausalLM, GPTLMHeadModel,
                           LLaMAForCausalLM, BaichuanForCausalLM)):
         return _default_fp8_quantize(model, quant_mode, quant_scales)

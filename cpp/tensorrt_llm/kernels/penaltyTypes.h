@@ -24,24 +24,20 @@ namespace tensorrt_llm
 namespace kernels
 {
 
-enum class DecodingPenaltyType
+enum class RepetitionPenaltyType
 {
-    Temperature, // the temperature penalty
-    Repetition,  // the repetition penalty
-    Presence,    // the presence penalty
-    Frequency,   // the frequency penalty
-    MinLength,   // the min length penalty
+    Repetition, // the repetition penalty
+    Presence,   // the presence penalty
+    Frequency,  // the frequency penalty
 };
 
-inline float getDefaultPenaltyValue(DecodingPenaltyType penalty_type)
+inline float getDefaultPenaltyValue(RepetitionPenaltyType penalty_type)
 {
     switch (penalty_type)
     {
-    case DecodingPenaltyType::Temperature: return 1.0f;
-    case DecodingPenaltyType::Repetition: return 1.0f;
-    case DecodingPenaltyType::Presence: return 0.0f;
-    case DecodingPenaltyType::Frequency: return 0.0f;
-    case DecodingPenaltyType::MinLength: return 1.0f;
+    case RepetitionPenaltyType::Repetition: return 1.0f;
+    case RepetitionPenaltyType::Presence: return 0.0f;
+    case RepetitionPenaltyType::Frequency: return 0.0f;
     default: break;
     }
     return 0.0f;

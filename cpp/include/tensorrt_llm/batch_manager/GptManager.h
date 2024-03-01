@@ -17,13 +17,15 @@
 #pragma once
 
 #include "tensorrt_llm/batch_manager/BatchManager.h"
+#include "tensorrt_llm/batch_manager/batchScheduler.h"
 #include "tensorrt_llm/batch_manager/callbacks.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
-#include "tensorrt_llm/batch_manager/schedulerPolicy.h"
 #include "tensorrt_llm/batch_manager/trtGptModelOptionalParams.h"
-
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <optional>
 
 namespace nvinfer1
@@ -51,7 +53,7 @@ public:
         batch_scheduler::SchedulerPolicy schedulerPolicy, GetInferenceRequestsCallback getInferenceRequestsCb,
         SendResponseCallback sendResponseCb, PollStopSignalCallback pollStopSignalCb = nullptr,
         ReturnBatchManagerStatsCallback returnBatchManagerStatsCb = nullptr,
-        TrtGptModelOptionalParams const& optionalParams = TrtGptModelOptionalParams(),
+        const TrtGptModelOptionalParams& optionalParams = TrtGptModelOptionalParams(),
         std::optional<uint64_t> terminateReqId = std::nullopt, std::optional<SizeType> maxDraftTokens = std::nullopt,
         bool excludeInputInOutput = false);
 
@@ -72,8 +74,6 @@ public:
 
     BatchManagerErrorCode_t shutdown();
 
-    SizeType getNumActiveRequests();
-
     virtual ~GptManager();
 
 protected:
@@ -82,9 +82,9 @@ protected:
     virtual BatchManagerErrorCode_t step(RequestList& activeRequests, std::set<uint64_t>& activeRequestsIds);
 
 private:
-    [[nodiscard]] SizeType getMaxInputLen() const;
-    [[nodiscard]] SizeType getMaxSequenceLen() const;
-    [[nodiscard]] SizeType getMaxNumSequences() const;
+    SizeType getMaxInputLen() const;
+    SizeType getMaxOutputLen() const;
+    SizeType getMaxNumSequences() const;
 
     void validateLlmRequest(LlmRequest& newReq) const;
     static std::shared_ptr<LlmRequest> fillLlmRequest(std::shared_ptr<InferenceRequest> newReq);

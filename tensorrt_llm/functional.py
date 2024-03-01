@@ -30,10 +30,11 @@ from . import graph_rewriting as gw
 from ._common import default_net, default_trtnet, precision
 from ._utils import (bf16_array, dim_resolve_negative, dim_to_trt_axes,
                      fp16_array, fp32_array, int32_array, np_dtype_to_trt,
-                     str_dtype_to_trt, torch_to_numpy, trt_dtype_to_np,
-                     trt_dtype_to_torch)
+                     str_dtype_to_np, str_dtype_to_trt, torch_to_numpy,
+                     trt_dtype_to_np, trt_dtype_to_torch)
+from .logger import logger
 from .network import PluginInfo, set_np_weight, set_plugin_info
-from .plugin import TRT_LLM_PLUGIN_NAMESPACE, current_all_reduce_helper
+from .plugin import TRT_LLM_PLUGIN_NAMESPACE
 from .quantization import QuantMode
 
 
@@ -433,12 +434,6 @@ class Tensor(object):
         See functional.sqrt.
         '''
         return sqrt(self)
-
-    def log(self):
-        '''
-        See functional.log.
-        '''
-        return log(self)
 
     def cast(self, dtype):
         '''
@@ -981,12 +976,9 @@ def matmul(input: Tensor,
         The tensor produced by the inserted layer.
     '''
     # This option is only supported for fp16, but not bf16 or any other precisions.
-    use_fp32_acc = use_fp32_acc and input.dtype == trt.DataType.HALF and mat2.dtype == trt.DataType.HALF
-
     # TODO: fp32 accum has issues with strongly_typed and it will be fixed in TensorRT 10.0
-    if default_net().strongly_typed:
-        use_fp32_acc = False
-
+    use_fp32_acc = use_fp32_acc and input.dtype == trt.DataType.HALF and mat2.dtype == trt.DataType.HALF and not default_net(
+    ).strongly_typed
     if use_fp32_acc:
         input = cast(input, 'float32')
         mat2 = cast(mat2, 'float32')
@@ -1497,55 +1489,6 @@ def unsqueeze(input: Tensor, axis: int):
     return expand_dims(input, axis)
 
 
-def stack(inputs: Sequence[Tensor], dim: int = 0) -> Tensor:
-    '''
-    Add an operation to contact input tensors along a new dimension.
-
-    The function creates an operation that creates a new dim for all the
-    input tensors and then concatenates them along that new dim.
-.
-
-    All the tensors in 'inputs' must have the same shape.
-
-        for ii in range(inputs[0].rank()):
-            assert all(inp.shape[ii] == inputs[0].shape[ii] for inp in inputs)
-
-    The shape of the output tensor is defined as:
-
-        output.rank() = inputs[0].rank() + 1
-
-        output.shape[dim] = len(inputs)
-
-        for ii in range(inputs[0].rank()):
-            if ii < dim:
-                output.shape[ii] = inputs[0].shape[ii]
-            else:
-                output.shape[ii+1] = inputs[0].shape[ii]
-
-    For example, given a sequence of two 2D tensors [[0, 1], [2, 3]] and
-    [[4, 5], [6, 7]] both of shape [2, 2],
-
-        stack(inputs, 0)
-
-    will produce [[[0, 1], [2, 3]], [[4, 5], [6, 7]]] of shape [2, 2, 2] and
-
-        stack(inputs, 1)
-
-    will produce [[[0, 1], [4, 5]], [[2, 3], [6, 7]]] of shape [2, 2, 2].
-
-    Parameters:
-        inputs : Sequence[Tensor]
-            The sequence of tensors to stack.
-
-        dim : int
-            The dimension in which the stack is performed.
-
-    Returns:
-        A tensor that contains the input tensors stacked along a new dimension.
-    '''
-    return concat([unsqueeze(inp, axis=dim) for inp in inputs], dim=dim)
-
-
 def expand_dims_like(left: Union[Tensor, int, float], right: Tensor) -> Tensor:
     '''
     Add an operation to expand the first tensor to the same rank as the second
@@ -1938,44 +1881,6 @@ def cumsum(input: Tensor, dim: int) -> Tensor:
     return _create_tensor(loop_output_layer.get_output(0), loop_output_layer)
 
 
-def masked_scatter(input: Tensor, mask: Tensor, source: Tensor) -> Tensor:
-    '''
-    Add the masked_scatter base on PyTorch definition.
-
-    See https://pytorch.org/docs/stable/generated/torch.Tensor.masked_scatter_.html#torch.Tensor.masked_scatter_ for a
-    description of that function.
-
-    Parameters:
-        input : Tensor
-            The input tensor.
-
-        mask : Tensor
-            The boolean mask tensor that indicates elements to select.
-
-        source: Tensor
-            The tensor to copy from
-    Returns:
-        The tensor containing the source tensor selected by mask.
-
-    '''
-    assert input.rank() >= 1, "input should have rank >= 1"
-    input, mask = broadcast_helper(input, mask)
-    expanded_mask = expand(mask, shape(input))
-
-    non_zero_layer = default_trtnet().add_non_zero(expanded_mask.trt_tensor)
-
-    shuffle_layer = default_trtnet().add_shuffle(non_zero_layer.get_output(0))
-    shuffle_layer.second_transpose = (1, 0)
-    source = source.view([-1])
-
-    scatter_layer = default_trtnet().add_scatter(input.trt_tensor,
-                                                 shuffle_layer.get_output(0),
-                                                 source.trt_tensor,
-                                                 mode=trt.ScatterMode.ND)
-
-    return _create_tensor(scatter_layer.get_output(0), scatter_layer)
-
-
 def concat(inputs: Sequence[Union[Tensor, int]], dim: int = 0) -> Tensor:
     '''
     Add an operation to concatenate tensors.
@@ -2005,7 +1910,7 @@ def concat(inputs: Sequence[Union[Tensor, int]], dim: int = 0) -> Tensor:
 
         concat(inputs, 0)
 
-    will produce [[0, 1], [2, 3], [4, 5], [6, 7]] of shape [4, 2] and
+    will produce [[[0, 1], [2, 3]], [[4, 5], [6, 7]]] of shape [4, 2] and
 
         concat(inputs, 1)
 
@@ -2116,7 +2021,9 @@ def embedding(input: Tensor,
               tp_size=1,
               tp_group=None,
               sharding_dim=0,
-              tp_rank=None) -> Tensor:
+              tp_rank=None,
+              workspace: Optional[Tensor] = None,
+              instance_id: int = 0) -> Tensor:
     '''
     Add an operation to perform embedding lookup.
 
@@ -2167,11 +2074,18 @@ def embedding(input: Tensor,
         tp_rank : int
             The tensor parallelism rank. Used to calculate offset in TP on vocab dim.
 
+        workspace: Optional[Tensor]
+            See allreduce's documentation for workspace.
+
+        instance_id: int
+            See allreduce's documentation for instance_id.
+
     Returns:
         The tensor produced by the embedding lookup layer.
     '''
 
     # Distribute embedding lookup table across multiple GPU
+    default_net().plugin_config.lookup_plugin = 'float16'
     if tp_size > 1 and tp_group is not None:
         if sharding_dim == 0:  # TP on vocab_size dimension
             if tp_rank == None:
@@ -2180,7 +2094,7 @@ def embedding(input: Tensor,
 
             if default_net().plugin_config.lookup_plugin:
                 x = _lookup_plugin(input, weight, tp_rank)
-                x = allreduce(x, tp_group)
+                # x = allreduce(x, tp_group, workspace, instance_id, None, tp_rank)
             else:
                 shape_weight = shape(weight)
                 vocab_size = slice(shape_weight, starts=[0], sizes=[1])
@@ -2205,7 +2119,7 @@ def embedding(input: Tensor,
                 x = where(is_qualified_expand, tmp_output, placeholder)
 
                 # Use all reduce to collect the results
-                x = allreduce(x, tp_group)
+                x = allreduce(x, tp_group, workspace, instance_id,tp_rank)
 
         elif sharding_dim == 1:  # TP on hidden dimension
             layer = default_trtnet().add_gather(weight.trt_tensor,
@@ -2236,13 +2150,11 @@ def constant_to_tensor_(input: Union[Tensor, int, float],
     if isinstance(input, int):
         return constant(int32_array([input]))
     elif isinstance(input, float):
-        array_fn_dict = {
-            trt.float32: fp32_array,
-            trt.float16: fp16_array,
-            trt.bfloat16: bf16_array,
-        }
-        assert dtype in array_fn_dict
-        return constant(array_fn_dict[dtype]([input]))
+        assert dtype == trt.float32 or dtype == trt.float16
+        if dtype == trt.float32:
+            return constant(fp32_array([input]))
+        else:
+            return constant(fp16_array([input]))
 
     return input
 
@@ -2426,7 +2338,6 @@ def unary(input: Tensor, op: trt.UnaryOperation) -> Tensor:
         sin     for op=trt.UnaryOperation.SIN
         cos     for op=trt.UnaryOperation.COS
         abs     for op=trt.UnaryOperation.ABS
-        log     for op=trt.UnaryOperation.LOG
 
     It is implemented using the IUnaryLayer from TensorRT.
 
@@ -2450,7 +2361,6 @@ exp = partial(unary, op=trt.UnaryOperation.EXP)
 sin = partial(unary, op=trt.UnaryOperation.SIN)
 cos = partial(unary, op=trt.UnaryOperation.COS)
 abs = partial(unary, op=trt.UnaryOperation.ABS)
-log = partial(unary, op=trt.UnaryOperation.LOG)
 
 
 def mean(input: Tensor, dim: int, keepdim: bool = False) -> Tensor:
@@ -2512,38 +2422,6 @@ def max(input: Tensor, dim: int, keepdim: bool = False) -> Tensor:
 
     layer = default_trtnet().add_reduce(input.trt_tensor,
                                         trt.ReduceOperation.MAX,
-                                        axes,
-                                        keep_dims=keepdim)
-    return _create_tensor(layer.get_output(0), layer)
-
-
-def sum(input: Tensor, dim: int, keepdim: bool = False) -> Tensor:
-    '''
-    Add an operation to compute the sum along a dimension.
-
-    Computes the sum along the dimension 'dim' of the input tensor.
-
-    It is implemented using the IReduceLayer from TensorRT.
-
-    Parameters:
-        input : Tensor
-            The input tensor.
-
-        dim : int
-            The dimension along which the mean is computed.
-
-        keepdim : bool
-            Is the dimension kept in the reduced tensor? When True the
-            dimension is kept, it is removed from the shape otherwise.
-
-    Returns:
-        The tensor produced by this reduction operation.
-    '''
-    dim = dim_resolve_negative(dim, input.ndim())
-    axes = dim_to_trt_axes(dim)
-
-    layer = default_trtnet().add_reduce(input.trt_tensor,
-                                        trt.ReduceOperation.SUM,
                                         axes,
                                         keep_dims=keepdim)
     return _create_tensor(layer.get_output(0), layer)
@@ -2857,6 +2735,8 @@ def conv2d(input: Tensor,
     ## TODO: Document that function!
     ##
 
+    assert not input.is_dynamic()
+
     ndim = input.ndim()
     if ndim == 3:
         input = expand_dims(input, 0)
@@ -3076,7 +2956,10 @@ class AllReduceStrategy(IntEnum):
 
 def allreduce(tensor: Tensor,
               group: List[int],
-              strategy: Optional[AllReduceStrategy] = None) -> Tensor:
+              workspace: Optional[Tensor] = None,
+              instance_id: int = 0,
+              strategy: Optional[AllReduceStrategy] = None,
+              rank: int = 0) -> Tensor:
     '''
     Add an operation that performs a collective all-reduce.
 
@@ -3103,14 +2986,21 @@ def allreduce(tensor: Tensor,
         group : List[int]
             The ranks participating into the all-reduce operation.
 
-        strategy: AllReduceStrategy
-            RING delegates all-reduce to NCCL while ONESHOT and TWOSHOT are custom latency-optimal algorithms.
-            AUTO chooses amongst the three based on a message-size heuristic.
+        workspace: Optional[Tensor]
+            When using CUSTOM or AUTO mode, a tensor containing pointers to memory
+            visible to all GPUs. It should be 3 poitners per TP rank -
+            ptr to data buffer, ptr to barriers in, ptr to barriers out.
+            It must be initialized using IpcMemory class.
+
+        instance_id: int
+            Used for synchronization with CUSTOM or AUTO. Corresponding plugins MUST have the same
+            instance_id. I.e. GPU#0's allreduce after MLP at layer i must have the same instance_id as
+            GPU#1, GPU#2... Also, instance_id MUST be unique per model. There should not be two allreduce instances
+            in GPU#0 that have the same id.
 
     Returns:
         The tensor produced by that layer.
     '''
-
     allreduce_plg_creator = trt.get_plugin_registry().get_plugin_creator(
         'AllReduce', '1', TRT_LLM_PLUGIN_NAMESPACE)
 
@@ -3120,12 +3010,15 @@ def allreduce(tensor: Tensor,
         else:
             strategy = AllReduceStrategy.RING
 
-    counter = 0
-    workspace = None
-
     if strategy != AllReduceStrategy.RING:
-        counter = current_all_reduce_helper().gen_id()
-        workspace = current_all_reduce_helper().workspace
+        if not hasattr(allreduce, "ids"):
+            allreduce.ids = set()
+
+        if instance_id not in allreduce.ids:
+            allreduce.ids.add(instance_id)
+        else:
+            logger.warning(
+                f"Custom allreduce has already used id {instance_id}")
 
     assert allreduce_plg_creator is not None
 
@@ -3140,19 +3033,24 @@ def allreduce(tensor: Tensor,
     p_strategy = trt.PluginField("strategy", np.array([int(strategy)], np.int8),
                                  trt.PluginFieldType.INT8)
     pfc.append(p_strategy)
-    p_counter = trt.PluginField("counter", np.array([counter], np.int32),
+    p_counter = trt.PluginField("counter", np.array([instance_id + 1],
+                                                    np.int32),
                                 trt.PluginFieldType.INT32)
     pfc.append(p_counter)
+    p_rank = trt.PluginField("rank", np.array([rank],
+                                                    np.int32),
+                                trt.PluginFieldType.INT32)
+    pfc.append(p_rank)
 
     pfc = trt.PluginFieldCollection(pfc)
     ar_plug = allreduce_plg_creator.create_plugin("allreduce", pfc)
-    plug_inputs = [tensor.cast(p_dtype).trt_tensor]
+    plug_inputs = [tensor.trt_tensor]
     if strategy != AllReduceStrategy.RING:
         plug_inputs.append(workspace.trt_tensor)
 
     layer = default_trtnet().add_plugin_v2(plug_inputs, ar_plug)
     _add_plugin_info(layer, allreduce_plg_creator, "allreduce", pfc)
-    return _create_tensor(layer.get_output(0), layer).cast(tensor.dtype)
+    return _create_tensor(layer.get_output(0), layer)
 
 
 def allgather(tensor: Tensor, group: List[int], gather_dim: int = 0) -> Tensor:
@@ -3208,12 +3106,12 @@ def allgather(tensor: Tensor, group: List[int], gather_dim: int = 0) -> Tensor:
 
     pfc = trt.PluginFieldCollection([group, pf_type])
     allgather = allgather_plg_creator.create_plugin("allgather", pfc)
-    plug_inputs = [tensor.cast(p_dtype).trt_tensor]
+    plug_inputs = [tensor.trt_tensor]
 
     layer = default_trtnet().add_plugin_v2(plug_inputs, allgather)
     _add_plugin_info(layer, allgather_plg_creator, "allgather", pfc)
 
-    x = _create_tensor(layer.get_output(0), layer).cast(tensor.dtype)
+    x = _create_tensor(layer.get_output(0), layer)
 
     # gather along a given dimension other than dim0
     if gather_dim != 0:
@@ -3279,11 +3177,11 @@ def send(tensor: Tensor, tgt: int) -> Tensor:
 
     pfc = trt.PluginFieldCollection([tgt, pf_type])
     send_plug = send_plg_creator.create_plugin("send", pfc)
-    plug_inputs = [tensor.cast(p_dtype).trt_tensor]
+    plug_inputs = [tensor.trt_tensor]
 
     layer = default_trtnet().add_plugin_v2(plug_inputs, send_plug)
     _add_plugin_info(layer, send_plg_creator, "send", pfc)
-    return _create_tensor(layer.get_output(0), layer).cast(tensor.dtype)
+    return _create_tensor(layer.get_output(0), layer)
 
 
 def recv(tensor: Tensor, src: int) -> Tensor:
@@ -3322,11 +3220,11 @@ def recv(tensor: Tensor, src: int) -> Tensor:
 
     pfc = trt.PluginFieldCollection([src, pf_type])
     recv_plug = recv_plg_creator.create_plugin("recv", pfc)
-    plug_inputs = [tensor.cast(p_dtype).trt_tensor]
+    plug_inputs = [tensor.trt_tensor]
 
     layer = default_trtnet().add_plugin_v2(plug_inputs, recv_plug)
     _add_plugin_info(layer, recv_plg_creator, "recv", pfc)
-    return _create_tensor(layer.get_output(0), layer).cast(tensor.dtype)
+    return _create_tensor(layer.get_output(0), layer)
 
 
 def bert_attention(tensor: Tensor,
@@ -3466,7 +3364,6 @@ def gpt_attention(
     context_lengths: Optional[Tensor],
     cache_indirection: Optional[Tensor],
     host_request_types: Tensor,
-    layer_idx: int,
     num_heads: int,
     num_kv_heads: int,
     hidden_size_per_head: int,
@@ -3501,8 +3398,6 @@ def gpt_attention(
         bool] = False,  # for dense fmha in context phase
     qkv_bias: Optional[Tensor] = None,
     use_cache: bool = True,
-    medusa_position_offsets: Tensor = None,
-    medusa_packed_mask: Tensor = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     '''
     Add an operation that performs the multi-head attention in GPT-like models.
@@ -3553,9 +3448,6 @@ def gpt_attention(
             The tensor on the host that indicates if a request is in context or
             generation phase. Its shape is [batch_size]. See Inflight Batching
             in docs/gpt_attention.md,
-
-        layer_idx: int
-            The index of this attention layer, used to access kv_cache_block_pointers,
 
         num_heads: int
             The number of heads,
@@ -3636,7 +3528,7 @@ def gpt_attention(
 
         kv_cache_block_pointers:
             The tensor of block pointers for the KV cache. Its shape is
-            [num_layers, max_batch_size, max_beam_width, 2, max_blocks_per_sequence * 2]
+            [max_batch_size, max_beam_width, 2, max_blocks_per_sequence * 2]
             See KV cache section in docs/gpt_attention.md, on gpu
 
         host_kv_cache_block_pointers:
@@ -3675,18 +3567,6 @@ def gpt_attention(
             Do we use dense fmha in context phase,
 
         qkv_bias: Tensor = None,
-            The qkv bias tensor.
-
-        use_cache: bool = False
-            Do we need to store kv cache ? not needed if there is no generation phase.
-
-        medusa_position_offsets: Tensor = None,
-            The medusa tokens's position offsets (shared by all sequences).
-            Shape: [Num_medusa_tokens + 1].
-
-        medusa_packed_mask: Tensor = None,
-            The medusa tokens's attention mask (packed into uint32_t bits).
-            Shape: [Num_medusa_tokens + 1, divUp(Num_medusa_tokens + 1, 32)].
 
     Returns:
         The tensor produced by that layer.
@@ -3711,9 +3591,6 @@ def gpt_attention(
         "unfuse_qkv_gemm", np.array(np.int8(is_unfuse_qkv_gemm), dtype=np.int8),
         trt.PluginFieldType.INT8)
 
-    layer_idx = trt.PluginField("layer_idx", np.array(layer_idx,
-                                                      dtype=np.int32),
-                                trt.PluginFieldType.INT32)
     nheads = trt.PluginField("num_heads", np.array(num_heads, dtype=np.int32),
                              trt.PluginFieldType.INT32)
     num_kv_heads = trt.PluginField("num_kv_heads",
@@ -3759,10 +3636,6 @@ def gpt_attention(
         "remove_input_padding",
         np.array(np.int8(default_net().plugin_config.remove_input_padding),
                  dtype=np.int8), trt.PluginFieldType.INT8)
-    is_medusa_enabled = trt.PluginField(
-        "is_medusa_enabled",
-        np.array(np.int8(medusa_packed_mask is not None), dtype=np.int8),
-        trt.PluginFieldType.INT8)
     p_dtype = default_net().plugin_config.gpt_attention_plugin
     pf_type = trt.PluginField(
         "type_id", np.array([int(str_dtype_to_trt(p_dtype))], np.int32),
@@ -3773,10 +3646,6 @@ def gpt_attention(
     multi_block_mode = trt.PluginField(
         "multi_block_mode",
         np.array(np.int8(default_net().plugin_config.multi_block_mode),
-                 dtype=np.int8), trt.PluginFieldType.INT8)
-    enable_xqa = trt.PluginField(
-        "enable_xqa",
-        np.array(np.int8(default_net().plugin_config.enable_xqa),
                  dtype=np.int8), trt.PluginFieldType.INT8)
     tp_size = trt.PluginField("tp_size", np.array(tp_size, dtype=np.int32),
                               trt.PluginFieldType.INT32)
@@ -3827,16 +3696,15 @@ def gpt_attention(
                                    trt.PluginFieldType.INT32)
 
     pfc = trt.PluginFieldCollection([
-        layer_idx, nheads, num_kv_heads, head_size, unidirectional, q_scaling,
+        nheads, num_kv_heads, head_size, unidirectional, q_scaling,
         position_embedding_type, rotary_embedding_dim, rotary_embedding_base,
         rotary_embedding_scale_type, rotary_embedding_scale,
         rotary_embedding_max_positions, tp_size, tp_rank, unfuse_qkv_gemm,
-        context_fmha_type, multi_block_mode, enable_xqa,
-        kv_cache_quant_mode_field, remove_input_padding, mask_type,
-        paged_kv_cache, tokens_per_block, pf_type, max_context_length,
-        qkv_bias_enabled, do_cross_attention_field, max_distance,
-        pos_shift_enabled, dense_context_fmha, use_paged_context_fmha_field,
-        use_cache_pf, is_medusa_enabled
+        context_fmha_type, multi_block_mode, kv_cache_quant_mode_field,
+        remove_input_padding, mask_type, paged_kv_cache, tokens_per_block,
+        pf_type, max_context_length, qkv_bias_enabled, do_cross_attention_field,
+        max_distance, pos_shift_enabled, dense_context_fmha,
+        use_paged_context_fmha_field, use_cache_pf
     ])
 
     attn_plug = attn_plg_creator.create_plugin("causal_attn", pfc)
@@ -3858,10 +3726,9 @@ def gpt_attention(
             context_lengths,
             host_request_types,
         ]
+
     if use_cache:
         if paged_kv_cache_flag:
-            assert kv_cache_block_pointers is not None, "Paged kv cache is enabled, the kv_cache_block_pointers tensor shall not be None"
-            assert host_kv_cache_block_pointers is not None, "Paged kv cache is enabled, the host_kv_cache_block_pointers tensor shall not be None"
             plug_inputs += [
                 kv_cache_block_pointers, host_kv_cache_block_pointers
             ]
@@ -3885,14 +3752,6 @@ def gpt_attention(
 
     if qkv_bias is not None:
         plug_inputs += [qkv_bias]
-
-    if medusa_packed_mask is not None:
-        # add position_ids as well only if medusa mode
-        assert medusa_position_offsets is not None
-        plug_inputs += [medusa_packed_mask, medusa_position_offsets]
-
-    for idx, i in enumerate(plug_inputs):
-        assert i is not None, f"Found None input for {idx} th item in plugin inputs {plug_inputs}"
 
     plug_inputs = [i.trt_tensor for i in plug_inputs]
     layer = default_trtnet().add_plugin_v2(plug_inputs, attn_plug)
@@ -3972,20 +3831,54 @@ def layer_norm(input: Tensor,
     Returns:
         The output tensor of that operation.
     '''
-    input, weight = broadcast_helper(input, weight)
-    input, bias = broadcast_helper(input, bias)
-    if isinstance(normalized_shape, int):  # FIXME: better way?
-        axis = input.ndim() - 1
+    if not default_net().plugin_config.layernorm_plugin:
+        input, weight = broadcast_helper(input, weight)
+        input, bias = broadcast_helper(input, bias)
+        if isinstance(normalized_shape, int):  # FIXME: better way?
+            axis = input.ndim() - 1
+        else:
+            axis = input.ndim() - len(normalized_shape)
+        axes_mask = 0
+        for i in range(axis, input.ndim()):
+            axes_mask |= 1 << i
+        layer = default_trtnet().add_normalization(input.trt_tensor,
+                                                   weight.trt_tensor,
+                                                   bias.trt_tensor, axes_mask)
+        layer.epsilon = eps
+        return _create_tensor(layer.get_output(0), layer)
     else:
-        axis = input.ndim() - len(normalized_shape)
-    axes_mask = 0
-    for i in range(axis, input.ndim()):
-        axes_mask |= 1 << i
-    layer = default_trtnet().add_normalization(input.trt_tensor,
-                                               weight.trt_tensor,
-                                               bias.trt_tensor, axes_mask)
-    layer.epsilon = eps
-    return _create_tensor(layer.get_output(0), layer)
+        logger.warning("Layernorm plugin is going to be deprecated, "
+                       "disable it for better performance.")
+        plg_creator = trt.get_plugin_registry().get_plugin_creator(
+            'Layernorm', '1', TRT_LLM_PLUGIN_NAMESPACE)
+        assert plg_creator is not None
+
+        eps = trt.PluginField("eps", np.array(eps, dtype=np.float32),
+                              trt.PluginFieldType.FLOAT32)
+        use_diff_of_squares = trt.PluginField(
+            "use_diff_of_squares",
+            np.array([int(use_diff_of_squares)], dtype=np.int32),
+            trt.PluginFieldType.INT32)
+        p_dtype = default_net().plugin_config.layernorm_plugin
+        pf_type = trt.PluginField(
+            "type_id", np.array([int(str_dtype_to_trt(p_dtype))], np.int32),
+            trt.PluginFieldType.INT32)
+        pfc = trt.PluginFieldCollection([eps, use_diff_of_squares, pf_type])
+        layernorm_plug = plg_creator.create_plugin("layernorm", pfc)
+
+        normalized_shape = [normalized_shape] if isinstance(
+            normalized_shape, int) else normalized_shape
+        if weight is None:
+            weight = constant(
+                np.ones(normalized_shape, dtype=str_dtype_to_np(p_dtype)))
+        if bias is None:
+            bias = constant(
+                np.zeros(normalized_shape, dtype=str_dtype_to_np(p_dtype)))
+
+        plug_inputs = [input.trt_tensor, weight.trt_tensor, bias.trt_tensor]
+        layer = default_trtnet().add_plugin_v2(plug_inputs, layernorm_plug)
+        _add_plugin_info(layer, plg_creator, "layernorm", pfc)
+        return _create_tensor(layer.get_output(0), layer)
 
 
 def rms_norm(input: Tensor,
@@ -4021,33 +3914,60 @@ def rms_norm(input: Tensor,
     Returns:
         The output tensor of that operation.
     '''
-    normalized_shape = [normalized_shape] if isinstance(
-        normalized_shape, int) else normalized_shape
+    if not default_net().plugin_config.rmsnorm_plugin:
+        normalized_shape = [normalized_shape] if isinstance(
+            normalized_shape, int) else normalized_shape
 
-    dim = tuple([-i - 1 for i in range(len(normalized_shape))])
+        dim = tuple([-i - 1 for i in range(len(normalized_shape))])
 
-    if default_net().strongly_typed:
-        input_dtype = input.dtype
-        fp32_input = cast(input, "float32")
-        varx = pow(fp32_input, 2.0)
+        if default_net().strongly_typed:
+            input_dtype = input.dtype
+            fp32_input = cast(input, "float32")
+            varx = pow(fp32_input, 2.0)
 
-        varx = varx.mean(dim, keepdim=True)
-        denom = varx + eps
-        denom = denom.sqrt()
-        fp32_y = fp32_input / denom
-        y = cast(fp32_y, input_dtype)
-    else:
-        with precision("float32"):
-            varx = pow(input, 2.0)
             varx = varx.mean(dim, keepdim=True)
             denom = varx + eps
             denom = denom.sqrt()
-            y = input / denom
+            fp32_y = fp32_input / denom
+            y = cast(fp32_y, input_dtype)
+        else:
+            with precision("float32"):
+                varx = pow(input, 2.0)
+                varx = varx.mean(dim, keepdim=True)
+                denom = varx + eps
+                denom = denom.sqrt()
+                y = input / denom
 
-    if weight is not None:
-        y = y * weight
+        if weight is not None:
+            y = y * weight
 
-    return y
+        return y
+    else:
+        logger.warning("RMSnorm plugin is going to be deprecated, "
+                       "disable it for better performance.")
+        plg_creator = trt.get_plugin_registry().get_plugin_creator(
+            'Rmsnorm', '1', TRT_LLM_PLUGIN_NAMESPACE)
+        assert plg_creator is not None
+
+        eps = trt.PluginField("eps", np.array(eps, dtype=np.float32),
+                              trt.PluginFieldType.FLOAT32)
+        p_dtype = default_net().plugin_config.rmsnorm_plugin
+        pf_type = trt.PluginField(
+            "type_id", np.array([int(str_dtype_to_trt(p_dtype))], np.int32),
+            trt.PluginFieldType.INT32)
+        pfc = trt.PluginFieldCollection([eps, pf_type])
+        rmsnorm_plug = plg_creator.create_plugin("rmsnorm", pfc)
+
+        normalized_shape = [normalized_shape] if isinstance(
+            normalized_shape, int) else normalized_shape
+        if weight is None:
+            weight = constant(
+                np.zeros(normalized_shape, dtype=str_dtype_to_np(p_dtype)))
+
+        plug_inputs = [input.trt_tensor, weight.trt_tensor]
+        layer = default_trtnet().add_plugin_v2(plug_inputs, rmsnorm_plug)
+        _add_plugin_info(layer, plg_creator, "rmsnorm", pfc)
+        return _create_tensor(layer.get_output(0), layer)
 
 
 def repeat_interleave(tensor: Tensor, repeats: int, dim: int) -> Tensor:
@@ -4189,7 +4109,7 @@ def expand_mask(mask: Tensor, tgt_len: Optional[Tensor] = None) -> Tensor:
     mask = mask.view(concat([bsz, 1, 1, src_len]))
 
     mask = expand(mask, concat([bsz, 1, tgt_len, src_len]))
-    mask = where(mask == 0, float('-inf'), 0.0)
+    mask = where(mask == 0, float('-inf'), (1 - mask).cast('float32'))
     return mask
 
 
@@ -4247,35 +4167,19 @@ def gather_last_token_logits(hidden_states: Tensor, last_token_ids: Tensor,
             concat([shape(last_token_ids, 0),
                     shape(hidden_states, 1)]))
     else:
-        ndim = last_token_ids.ndim()
-        if ndim == 1:
-            # only calculate logits for the last token
-            # [batch_size, seqlen, hidden_size] -> [batch_size, hidden_size]
-            last_token_ids = last_token_ids.view(
-                concat([shape(last_token_ids, 0), 1, 1]))
-            last_token_ids = expand(
-                last_token_ids,
-                concat([shape(last_token_ids, 0), 1,
+        # only calculate logits for the last token
+        # [batch_size, seqlen, hidden_size] -> [batch_size, hidden_size]
+        last_token_ids = last_token_ids.view(
+            concat([shape(last_token_ids, 0), 1, 1]))
+        last_token_ids = expand(
+            last_token_ids,
+            concat([shape(last_token_ids, 0), 1,
+                    shape(hidden_states, 2)]))
+        last_token_ids = last_token_ids - 1
+        hidden_states = gather(
+            hidden_states, dim=1, indices=last_token_ids).view(
+                concat([shape(hidden_states, 0),
                         shape(hidden_states, 2)]))
-            last_token_ids = last_token_ids - 1
-            hidden_states = gather(
-                hidden_states, dim=1, indices=last_token_ids).view(
-                    concat([shape(hidden_states, 0),
-                            shape(hidden_states, 2)]))
-        elif ndim == 2:  # speculative decoding needs last few token's logits
-            # last_token_ids is of shape [batch_size, num_last_tokens]
-            # So [batch_size, seqlen, hidden_size] -> [batch_size, num_last_tokens, hidden_size]
-            last_token_ids = last_token_ids.view(
-                concat([shape(last_token_ids, 0),
-                        shape(last_token_ids, 1), 1]))
-            last_token_ids = expand(
-                last_token_ids,
-                concat([
-                    shape(last_token_ids, 0),
-                    shape(last_token_ids, 1),
-                    shape(hidden_states, 2)
-                ]))
-            hidden_states = gather(hidden_states, dim=1, indices=last_token_ids)
     return hidden_states
 
 
@@ -4286,7 +4190,6 @@ ACT2FN = {
     'gelu_new': gelu,
     'gelu_fast': gelu,
     'geglu': geglu,
-    'identity': identity,
     'silu': silu,
     'softplus': softplus,
     'squared-relu': squared_relu,
@@ -4456,156 +4359,3 @@ def lora_plugin(
             _create_tensor(layer.get_output(i), layer)
             for i in range(num_lora_modules)
         ]
-
-
-def selective_scan(
-    input: Tensor,
-    state: Tensor,
-    delta: Tensor,
-    delta_bias: Tensor,
-    A: Tensor,
-    B: Tensor,
-    C: Tensor,
-    D: Tensor,
-    z: Tensor,
-    host_request_types: Tensor,
-    dim: int,
-    dstate: int,
-    is_variable_B: bool,
-    is_variable_C: bool,
-    delta_softplus: bool,
-    dtype: str,
-):
-    '''
-    Parameters:
-        input : Tensor (On GPU)
-            The input tensor. Its shape is [batch_size, dim, seq_len]
-
-        state : Tensor (On GPU)
-            The ssm state tensor. Its shape is [batch_size, dim, dstate]
-
-        delta : Tensor (On GPU)
-            The delta tensor. Its shape is [batch_size, dim, seq_len]
-
-        delta_bias : Tensor (On GPU)
-            The delta bias tensor. Its shape is [dim]
-
-        A : Tensor (On GPU)
-            A matrix. Its shape is [dim, dstate]
-
-        B : Tensor (On GPU)
-            B matrix. Its shape is [batch_size, dstate, seq_len]
-
-        C : Tensor (On GPU)
-            C matrix. Its shape is [batch_size, dstate, seq_len]
-
-        D : Tensor (On GPU)
-            D matrix. Its shape is [dim]
-
-        z : Tensor (On GPU)
-            The z tensor. Its shape is [batch_size, dim, seq_len]
-
-        host_request_types : Tensor (On CPU)
-            The tensor on the host that indicates if a request is in context or
-            generation phase. Its shape is [batch_size]. See Inflight Batching
-            in docs/gpt_attention.md,
-
-        dim : int
-            The inner dimension of SSM block
-
-        dstate : int
-            The state dimension of SSM block
-
-        is_variable_B : bool
-            Is the matrix B a variable? Set to 'True' if B is a dynamic matrix
-            during inference, 'False' otherwise
-
-        is_variable_C : bool
-            Is the matrix C a variable? Set to 'True' if C is a dynamic matrix
-            during inference, 'False' otherwise
-
-        delta_softplus : bool
-            Do we apply softplus to the delta.
-
-        dtype: str
-            data type
-    '''
-    assert host_request_types is not None
-    selective_scan_plg_creator = trt.get_plugin_registry().get_plugin_creator(
-        'SelectiveScan', '1', TRT_LLM_PLUGIN_NAMESPACE)
-    assert selective_scan_plg_creator is not None
-
-    dim = trt.PluginField("dim", np.array(dim, dtype=np.int32),
-                          trt.PluginFieldType.INT32)
-    dstate = trt.PluginField("dstate", np.array(dstate, dtype=np.int32),
-                             trt.PluginFieldType.INT32)
-    is_variable_B = trt.PluginField(
-        "is_variable_B", np.array(np.int8(is_variable_B), dtype=np.int8),
-        trt.PluginFieldType.INT8)
-    is_variable_C = trt.PluginField(
-        "is_variable_C", np.array(np.int8(is_variable_C), dtype=np.int8),
-        trt.PluginFieldType.INT8)
-    delta_softplus = trt.PluginField(
-        "delta_softplus", np.array(np.int8(delta_softplus), dtype=np.int8),
-        trt.PluginFieldType.INT8)
-    pf_type = trt.PluginField(
-        "type_id", np.array([int(str_dtype_to_trt(dtype))], np.int32),
-        trt.PluginFieldType.INT32)
-
-    pfc = trt.PluginFieldCollection(
-        [dim, dstate, is_variable_B, is_variable_C, delta_softplus, pf_type])
-    selective_scan_plug = selective_scan_plg_creator.create_plugin(
-        "selectives_can", pfc)
-
-    plug_inputs = [
-        input, state, delta, delta_bias, A, B, C, D, z, host_request_types
-    ]
-    plug_inputs = [i.trt_tensor for i in plug_inputs]
-
-    layer = default_trtnet().add_plugin_v2(plug_inputs, selective_scan_plug)
-    _add_plugin_info(layer, selective_scan_plg_creator, "selectives_can", pfc)
-    output = _create_tensor(layer.get_output(0), layer)
-    present_state = _create_tensor(layer.get_output(1), layer)
-    return output, present_state
-
-
-def topk(input: Tensor,
-         k: int,
-         dim: int,
-         largest: bool = True) -> Tuple[Tensor, Tensor]:
-    '''
-    Add an topk operation.
-
-    Retrieve the top-K largest elements along a specified axis.
-    Given an input tensor of shape [a_1, a_2, ..., a_n, r]
-    and integer argument k, return two outputs:
-    Value tensor of shape [a_1, a_2, ..., a_{axis-1}, k, a_{axis+1}, ... a_n] which contains the values of the top k elements along the specified axis
-    Index tensor of shape [a_1, a_2, ..., a_{axis-1}, k, a_{axis+1}, ... a_n] which contains the indices of the top k elements (original indices from the input tensor).
-
-    Parameters:
-        input : Tensor
-            The input tensor.
-
-        k : int
-            A single positive value corresponding to the number of top elements to retrieve
-
-        dim: int
-            The dimension in which to compute the topk indices.
-
-        largest: bool
-            Controls whether to return largest or smallest elements
-
-
-    Returns:
-        The tensor produced by this argmax operation.
-    '''
-    dim = dim_resolve_negative(dim, input.ndim())
-    axes = dim_to_trt_axes(dim)
-    layer = default_trtnet().add_topk(
-        input.trt_tensor,
-        trt.TopKOperation.MAX if largest else trt.TopKOperation.MIN,
-        k=k,
-        axes=axes)
-
-    return _create_tensor(layer.get_output(0),
-                          layer), _create_tensor(layer.get_output(1), layer)

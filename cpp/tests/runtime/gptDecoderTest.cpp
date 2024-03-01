@@ -40,29 +40,25 @@ void testDecoder(nvinfer1::DataType const dtype, SamplingConfig const& samplingC
     SizeType constexpr nbLayers{2};
     SizeType constexpr nbHeads{16};
     SizeType constexpr hiddenSize{1024};
-    SizeType constexpr batchSize{4};
     GptModelConfig modelConfig{vocabSize, nbLayers, nbHeads, hiddenSize, dtype};
     modelConfig.useGptAttentionPlugin(false);
+
+    auto streamPtr = std::make_shared<CudaStream>();
+    BufferManager manager(streamPtr);
+
+    // create decoder
+    auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
+    auto decoder = IGptDecoder::create(modelConfig.getDataType(), vocabSize, vocabSizePadded, streamPtr);
+    ASSERT_TRUE(static_cast<bool>(decoder));
+
+    // setup decoder
+    auto const beamWidth = samplingConfig.beamWidth;
+    SizeType constexpr batchSize{4};
 
     SizeType constexpr maxInputLength{8};
     SizeType constexpr maxNewTokens{2};
     SizeType constexpr sinkTokenLength{0};
     auto constexpr maxSeqLength = maxInputLength + maxNewTokens;
-
-    auto streamPtr = std::make_shared<CudaStream>();
-    BufferManager manager(streamPtr);
-
-    // setup decoder
-    auto const beamWidth = samplingConfig.beamWidth;
-
-    auto const decodingMode = beamWidth == 1 ? DecodingMode::TopKTopP() : DecodingMode::BeamSearch();
-
-    // create decoder
-    auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
-    auto decoder = IGptDecoder::create(decodingMode, modelConfig.getDataType(), batchSize, beamWidth, vocabSize,
-        vocabSizePadded, maxSeqLength, streamPtr);
-    ASSERT_TRUE(static_cast<bool>(decoder));
-
     decoder->setup(samplingConfig, batchSize, maxSeqLength);
 
     // set up inputs
@@ -104,12 +100,9 @@ void testDecoder(nvinfer1::DataType const dtype, SamplingConfig const& samplingC
     outputs.finished = manager.gpu(ITensor::makeShape({batchSize, beamWidth}), nvinfer1::DataType::kBOOL);
     inputs.finished = ITensor::view(outputs.finished);
     manager.setZero(*outputs.finished);
-    outputs.finishedSum = BufferManager::pinned(ITensor::makeShape({batchSize}), nvinfer1::DataType::kINT32);
+    outputs.finishedSum = BufferManager::pinned(ITensor::makeShape({1}), nvinfer1::DataType::kINT32);
     auto* finishedSumHost = bufferCast<std::int32_t>(*outputs.finishedSum);
-    for (SizeType bi = 0; bi < batchSize; ++bi)
-    {
-        finishedSumHost[bi] = -1;
-    }
+    *finishedSumHost = -1;
 
     if (beamWidth > 1)
     {
@@ -132,15 +125,7 @@ void testDecoder(nvinfer1::DataType const dtype, SamplingConfig const& samplingC
     // run decoder
     EXPECT_FALSE(decoder->forward(outputs, inputs));
     inputs.step += 1;
-
-    {
-        SizeType finishedSum = 0;
-        for (SizeType bi = 0; bi < batchSize; ++bi)
-        {
-            finishedSum += finishedSumHost[bi];
-        }
-        EXPECT_EQ(finishedSum, 0);
-    }
+    EXPECT_EQ(*finishedSumHost, 0);
 
     // verify results
     auto outputsIdsHost = manager.copyFrom(*outputs.ids, MemoryType::kCPU);
@@ -172,14 +157,7 @@ void testDecoder(nvinfer1::DataType const dtype, SamplingConfig const& samplingC
 
     // run decoder again
     EXPECT_TRUE(decoder->forward(outputs, inputs));
-    {
-        SizeType finishedSum = 0;
-        for (SizeType bi = 0; bi < batchSize; ++bi)
-        {
-            finishedSum += finishedSumHost[bi];
-        }
-        EXPECT_EQ(finishedSum, outputs.finished->getSize());
-    }
+    EXPECT_EQ(*finishedSumHost, outputs.finished->getSize());
 }
 
 } // namespace
@@ -197,7 +175,7 @@ TEST_P(ParamTest, Test)
     testDecoder(dtype, samplingConfig);
 }
 
-INSTANTIATE_TEST_SUITE_P(DecoderTest, ParamTest,
+INSTANTIATE_TEST_SUITE_P(GptDecoderTest, ParamTest,
     testing::Combine(testing::Values(nvinfer1::DataType::kFLOAT, nvinfer1::DataType::kHALF), testing::Values(1, 3)),
     [](const testing::TestParamInfo<ParamTest::ParamType>& info)
     {

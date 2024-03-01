@@ -191,27 +191,22 @@ std::vector<Tensor> symmetric_quantize_helper(
     int8_t* unprocessed_quantized_weight_ptr = get_ptr<int8_t>(unprocessed_quantized_weight);
     int8_t* processed_quantized_weight_ptr = get_ptr<int8_t>(processed_quantized_weight);
 
-    // TODO(dastokes) This should be removed if Grouped GEMM is updated to not need interleaved input
-    bool force_interleave = weight.dim() == 3;
-
     if (weight.scalar_type() == at::ScalarType::Float)
     {
         symmetric_quantize<float, float>(processed_quantized_weight_ptr, unprocessed_quantized_weight_ptr,
-            get_ptr<float>(scales), get_ptr<const float>(weight), {num_experts, num_rows, num_cols}, ft_quant_type,
-            force_interleave);
+            get_ptr<float>(scales), get_ptr<const float>(weight), {num_experts, num_rows, num_cols}, ft_quant_type);
     }
     else if (weight.scalar_type() == at::ScalarType::Half)
     {
         symmetric_quantize<half, half>(processed_quantized_weight_ptr, unprocessed_quantized_weight_ptr,
-            get_ptr<half>(scales), get_ptr<const half>(weight), {num_experts, num_rows, num_cols}, ft_quant_type,
-            force_interleave);
+            get_ptr<half>(scales), get_ptr<const half>(weight), {num_experts, num_rows, num_cols}, ft_quant_type);
     }
 #ifdef ENABLE_BF16
     else if (weight.scalar_type() == at::ScalarType::BFloat16)
     {
         symmetric_quantize<__nv_bfloat16, __nv_bfloat16>(processed_quantized_weight_ptr,
             unprocessed_quantized_weight_ptr, get_ptr<__nv_bfloat16>(scales), get_ptr<const __nv_bfloat16>(weight),
-            {num_experts, num_rows, num_cols}, ft_quant_type, force_interleave);
+            {num_experts, num_rows, num_cols}, ft_quant_type);
     }
 #endif
     else
@@ -346,30 +341,31 @@ Tensor pack_int8_tensor_to_packed_int4(Tensor weight)
 
 // Utility methods that may be useful for preprocessing weights in torch.
 static auto symmetric_quantize_last_axis_of_batched_matrix
-    = torch::RegisterOperators("trtllm::symmetric_quantize_last_axis_of_batched_matrix",
+    = torch::RegisterOperators("fastertransformer::symmetric_quantize_last_axis_of_batched_matrix",
         &torch_ext::symmetric_quantize_last_axis_of_batched_matrix);
 
 static auto preprocess_weights_for_mixed_gemm = torch::RegisterOperators(
-    "trtllm::preprocess_weights_for_mixed_gemm", &torch_ext::preprocess_weights_for_mixed_gemm);
+    "fastertransformer::preprocess_weights_for_mixed_gemm", &torch_ext::preprocess_weights_for_mixed_gemm);
 
 static auto unpack_int4_packed_tensor_to_int8 = torch::RegisterOperators(
-    "trtllm::unpack_int4_packed_tensor_to_int8", &torch_ext::unpack_int4_packed_tensor_to_int8);
+    "fastertransformer::unpack_int4_packed_tensor_to_int8", &torch_ext::unpack_int4_packed_tensor_to_int8);
 
-static auto pack_int8_tensor_to_packed_int4
-    = torch::RegisterOperators("trtllm::pack_int8_tensor_to_packed_int4", &torch_ext::pack_int8_tensor_to_packed_int4);
+static auto pack_int8_tensor_to_packed_int4 = torch::RegisterOperators(
+    "fastertransformer::pack_int8_tensor_to_packed_int4", &torch_ext::pack_int8_tensor_to_packed_int4);
 
 // Utility methods exposed purely for unit tests in torch.
 static auto _symmetric_quantize_last_axis_of_batched_matrix
-    = torch::RegisterOperators("trtllm::_symmetric_quantize_last_axis_of_batched_matrix",
+    = torch::RegisterOperators("fastertransformer::_symmetric_quantize_last_axis_of_batched_matrix",
         &torch_ext::_symmetric_quantize_last_axis_of_batched_matrix);
 
-static auto add_bias_and_interleave_int4s
-    = torch::RegisterOperators("trtllm::_add_bias_and_interleave_int4s", &torch_ext::add_bias_and_interleave_int4s);
+static auto add_bias_and_interleave_int4s = torch::RegisterOperators(
+    "fastertransformer::_add_bias_and_interleave_int4s", &torch_ext::add_bias_and_interleave_int4s);
 
-static auto add_bias_and_interleave_int8s
-    = torch::RegisterOperators("trtllm::_add_bias_and_interleave_int8s", &torch_ext::add_bias_and_interleave_int8s);
+static auto add_bias_and_interleave_int8s = torch::RegisterOperators(
+    "fastertransformer::_add_bias_and_interleave_int8s", &torch_ext::add_bias_and_interleave_int8s);
 
-static auto permute_B_rows_for_mixed_gemm
-    = torch::RegisterOperators("trtllm::_permute_B_rows_for_mixed_gemm", &torch_ext::permute_B_rows_for_mixed_gemm);
+static auto permute_B_rows_for_mixed_gemm = torch::RegisterOperators(
+    "fastertransformer::_permute_B_rows_for_mixed_gemm", &torch_ext::permute_B_rows_for_mixed_gemm);
 
-static auto subbyte_transpose = torch::RegisterOperators("trtllm::_subbyte_transpose", &torch_ext::subbyte_transpose);
+static auto subbyte_transpose
+    = torch::RegisterOperators("fastertransformer::_subbyte_transpose", &torch_ext::subbyte_transpose);

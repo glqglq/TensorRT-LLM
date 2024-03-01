@@ -46,11 +46,7 @@ ReduceScatterPlugin::ReduceScatterPlugin(const void* data, size_t length)
         read(d, groupItem);
         mGroup.insert(groupItem);
     }
-    TLLM_CHECK_WITH_INFO(d == a + length,
-        "Expected length (%d) != real length (%d). This is often "
-        "caused by using different TensorRT-LLM version to build "
-        "engine and run engine.",
-        (int) length, (int) (d - a));
+    TLLM_CHECK(d == a + length);
 }
 
 // IPluginV2DynamicExt Methods
@@ -170,6 +166,16 @@ void ReduceScatterPlugin::destroy() noexcept
 {
     // This gets called when the network containing plugin is destroyed
     delete this;
+}
+
+void ReduceScatterPlugin::setPluginNamespace(const char* libNamespace) noexcept
+{
+    mNamespace = libNamespace;
+}
+
+const char* ReduceScatterPlugin::getPluginNamespace() const noexcept
+{
+    return mNamespace.c_str();
 }
 
 ///////////////

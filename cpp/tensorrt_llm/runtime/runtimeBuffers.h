@@ -91,19 +91,13 @@ public:
     TensorPtr lastTokenIds;
     TensorPtr requestTypes;        // with attention plugin. Host tensor
     TensorPtr allGenerationLogits; // pre-allocate a buffer to save all generation logits, device tensor
-    TensorPtr originalLogitsPtr;   // Record the initially created buffer address.
-                                 // `logits` will point to new buffer (i.e. `allGenerationLogits`) for each iteration to
-                                 // avoid overwrite during gather context/generation logits.
-                                 // `originalLogitsPtr` could reset the `logits` point to the initially buffer when
-                                 // microBatch call `buffer.reshape()`. This could avoid next microBatch's `logits`
-                                 // still point to `allGenerationLogits` and bring overwrite conflict.
 
     std::vector<TensorPtr> presentKeysVals;
-    std::vector<TensorPtr> presentKeysValsAlt; // without attention plugin
-    TensorPtr maxAttentionWindows;             // with attention plugin, host tensor
-    TensorPtr sinkTokenLengths;                // with attention plugin, host tensor
-    TensorPtr kvCacheBlockPointersHost;        // [numLayers, batchSize * beamWidth, 2, maxBlocksPerSeq * 2]
-    TensorPtr kvCacheBlockPointersDevice;      // [numLayers, batchSize * beamWidth, 2, maxBlocksPerSeq * 2]
+    std::vector<TensorPtr> presentKeysValsAlt;  // without attention plugin
+    std::vector<TensorPtr> maxAttentionWindows; // with attention plugin, host tensor
+    TensorPtr sinkTokenLengths;                 // with attention plugin, host tensor
+    TensorPtr kvCacheBlockPointersHost;         // [numLayers, batchSize * beamWidth, 2, maxBlocksPerSeq * 2]
+    TensorPtr kvCacheBlockPointersDevice;       // [numLayers, batchSize * beamWidth, 2, maxBlocksPerSeq * 2]
 
     // References to tmp buffers
     TensorPtr newTokens;
@@ -128,12 +122,13 @@ public:
     PromptTuningParams promptTuningParams;
     TensorPtr promptTuningTasksHost; // Tensor to hold tasks on host
 
-    // generation logit pointer list
-    std::shared_ptr<std::vector<TensorPtr>> generationLogitsFragments;
-    TensorPtr
-        cacheGenerationFragmentPointerDevice; // device pointer array, used in merge generation logits fragments kernel
-    TensorPtr
-        cacheGenerationFragmentPointerHost;   // host pointer array, used in merge generation logits fragments kernel
+    // Context and generation logits buffer
+    TensorPtr cacheContextLogits;
+    TensorPtr cacheContextLogitsHost;
+    TensorPtr cacheGenerationLogits;
+    TensorPtr cacheGenerationLogitsHost;
+    TensorPtr cacheGenerationFragmentPointerDevice;
+    TensorPtr cacheGenerationFragmentPointerHost;
 
     bool allocated{false};
 
@@ -147,8 +142,7 @@ public:
         SizeType maxAttentionWindow, SizeType sinkTokenLength, SizeType maxSequenceLength, BufferManager& manager);
 
     //! \brief Reshape buffers based on current GenerationConfig
-    void reshape(
-        KvCacheManager const* kvCacheManager, GptModelConfig const& modelConfig, WorldConfig const& worldConfig);
+    void reshape(GptModelConfig const& modelConfig, WorldConfig const& worldConfig);
 
     void reset(BufferManager& manager);
 

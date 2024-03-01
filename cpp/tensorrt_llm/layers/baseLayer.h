@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,32 +28,31 @@ class BaseLayer
 {
 public:
     BaseLayer(cudaStream_t stream, std::shared_ptr<tensorrt_llm::common::IAllocator> allocator,
-        cudaDeviceProp* prop = nullptr)
-        : mStream(stream)
-        , mAllocator(std::move(allocator))
-        , mCudaDeviceProp(prop)
-    {
-    }
-
+        bool is_free_buffer_after_forward, cudaDeviceProp* cuda_device_prop = nullptr)
+        : stream_(stream)
+        , allocator_(std::move(allocator))
+        , cuda_device_prop_(cuda_device_prop)
+        , is_free_buffer_after_forward_(is_free_buffer_after_forward){};
     virtual ~BaseLayer() = default;
 
     virtual cudaStream_t getStream()
     {
-        return mStream;
+        return stream_;
     }
 
     virtual void setStream(cudaStream_t stream)
     {
-        mStream = stream;
+        stream_ = stream;
     }
 
 protected:
     // device environments
-    cudaStream_t mStream;
-    std::shared_ptr<tensorrt_llm::common::IAllocator> mAllocator;
-    cudaDeviceProp* mCudaDeviceProp = nullptr;
+    cudaStream_t stream_;
+    std::shared_ptr<tensorrt_llm::common::IAllocator> allocator_;
+    cudaDeviceProp* cuda_device_prop_ = nullptr;
 
-    bool mIsAllocateBuffer = false; // TODO to be deprecated
+    bool is_free_buffer_after_forward_;
+    bool is_allocate_buffer_ = false; // TODO to be deprecated
 };
 
 } // namespace layers

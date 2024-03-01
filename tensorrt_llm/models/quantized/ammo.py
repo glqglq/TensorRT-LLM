@@ -51,10 +51,10 @@ def _register_falcon_linears(model):
 
 
 def _quantize_model(model: torch.nn.Module,
-                    qformat: Literal['fp8', 'int8_sq', 'int4_awq', 'w4a8_awq'],
+                    qformat: Literal['fp8', 'int8_sq', 'int4_awq'],
                     calib_dataloader: DataLoader,
                     quant_cfg_dict: Optional[Dict] = None) -> torch.nn.Module:
-    assert qformat in ['fp8', 'int8_sq', 'int4_awq', 'w4a8_awq'], \
+    assert qformat in ['fp8', 'int8_sq', 'int4_awq'], \
         f'Got unsupported AMMO quantization format, {qformat} '
     if qformat == "fp8":
         quant_cfg = atq.FP8_DEFAULT_CFG
@@ -62,8 +62,9 @@ def _quantize_model(model: torch.nn.Module,
         quant_cfg = atq.INT8_SMOOTHQUANT_CFG
     elif qformat == "int4_awq":
         quant_cfg = atq.INT4_AWQ_CFG
-    elif qformat == "w4a8_awq":
-        quant_cfg = atq.W4A8_AWQ_BETA_CFG
+        # AMMO 0.5.0 disables lm_head quantization by default, remove the filter
+        if "*lm_head*" in quant_cfg["quant_cfg"]:
+            del quant_cfg["quant_cfg"]["*lm_head*"]
     else:
         raise ValueError(f"Unsupported quantization format: {qformat}")
 
@@ -80,7 +81,6 @@ def _quantize_model(model: torch.nn.Module,
     _register_falcon_linears(model)
 
     logger.debug("Starting quantization...")
-    print(quant_cfg)
     atq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
     logger.debug("Quantization done")
     return model
@@ -88,7 +88,7 @@ def _quantize_model(model: torch.nn.Module,
 
 def quantize_and_export(
         model: torch.nn.Module,
-        qformat: Literal['fp8', 'int8_sq', 'int4_awq', 'w4a8_awq'],
+        qformat: Literal['fp8', 'int8_sq', 'int4_awq'],
         calib_dataloader: DataLoader,
         export_path: Optional[Union[str, Path]] = None,
         tensor_parallel_size: int = 1,
@@ -96,7 +96,6 @@ def quantize_and_export(
 
     model_cls_name = type(model).__name__
     model_lookup = {
-        ("xverse", ): "xverse",
         ("llama", "mistral"): "llama",
         ("gptj", ): "gptj",
         ("falcon", "rw"): "falcon",
@@ -131,7 +130,6 @@ def quantize_and_export(
                     torch.float16,
                     export_dir=export_path,
                     inference_tensor_parallel=tensor_parallel_size,
-                    export_npz=True,
                 )
         logger.info(f"Quantized model exported to :{export_path}")
     return model

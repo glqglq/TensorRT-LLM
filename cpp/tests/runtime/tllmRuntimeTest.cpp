@@ -34,6 +34,7 @@
 
 namespace fs = std::filesystem;
 namespace trt = nvinfer1;
+namespace onnx = nvonnxparser;
 
 namespace
 {

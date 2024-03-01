@@ -60,12 +60,6 @@ public:
         mStream = StreamPtr{stream, Deleter{ownsStream}};
     }
 
-    //! Construct with an existing cuda stream or the default stream by passing nullptr.
-    explicit CudaStream(cudaStream_t stream)
-        : CudaStream{stream, tensorrt_llm::common::getDevice(), false}
-    {
-    }
-
     //! Returns the device on which the stream was created.
     [[nodiscard]] int getDevice() const
     {

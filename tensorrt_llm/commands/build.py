@@ -16,26 +16,18 @@ import argparse
 import copy
 import os
 import time
-import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait
 from importlib.machinery import SourceFileLoader
 from multiprocessing import get_context
-from typing import Dict, Union
+from typing import Union
 
-import safetensors
 import torch
 
-from .._common import check_max_num_tokens
-from .._utils import str_dtype_to_torch, str_dtype_to_trt
 from ..builder import BuildConfig, Builder
 from ..graph_rewriting import optimize
 from ..logger import logger
 from ..models import MODEL_MAP, PretrainedConfig, PretrainedModel
-from ..models.modeling_utils import optimize_model
 from ..network import net_guard
-from ..plugin import PluginConfig, add_plugin_argument
-from ..quantization import QuantMode
-from ..quantization.mode import FP8, W4A8_AWQ, W4A16, W4A16_AWQ, W8A16
 from ..runtime.engine import Engine, EngineConfig
 from ..version import __version__
 
@@ -56,17 +48,6 @@ def parse_arguments():
     )
     parser.add_argument('--log_level', type=str, default='info')
     parser.add_argument(
-        '--profiling_verbosity',
-        type=str,
-        default='layer_names_only',
-        choices=['layer_names_only', 'detailed', 'none'],
-        help=
-        'The profiling verbosity for the generated TRT engine. Set to detailed can inspect tactic choices and kernel parameters.'
-    )
-    parser.add_argument('--enable_debug_output',
-                        default=False,
-                        action='store_true')
-    parser.add_argument(
         '--output_dir',
         type=str,
         default='engine_outputs',
@@ -84,104 +65,103 @@ def parse_arguments():
     parser.add_argument('--max_num_tokens', type=int, default=None)
     parser.add_argument(
         '--max_prompt_embedding_table_size',
-        '--max_multimodal_len',
         type=int,
         default=0,
-        help=
-        'Setting to a value > 0 enables support for prompt tuning or multimodal input.'
-    )
+        help='Setting to a value > 0 enables support for prompt tuning.')
+    parser.add_argument('--use_gpt_attention_plugin',
+                        nargs='?',
+                        const='float16',
+                        type=str,
+                        default=False,
+                        choices=['float16', 'bfloat16', 'float32'])
+    parser.add_argument('--use_gemm_plugin',
+                        nargs='?',
+                        const='float16',
+                        type=str,
+                        default=False,
+                        choices=['float16', 'bfloat16', 'float32'])
+    parser.add_argument('--use_lookup_plugin',
+                        nargs='?',
+                        const='float16',
+                        type=str,
+                        default=False,
+                        choices=['float16', 'bfloat16', 'float32'])
+    parser.add_argument('--enable_context_fmha',
+                        default=False,
+                        action='store_true')
+    parser.add_argument('--enable_context_fmha_fp32_acc',
+                        default=False,
+                        action='store_true')
     parser.add_argument(
-        '--use_fused_mlp',
+        '--multi_block_mode',
         default=False,
         action='store_true',
         help=
-        'Enable horizontal fusion in GatedMLP, reduces layer input traffic and potentially improves performance. '
+        'Split long kv sequence into multiple blocks (applied to generation MHA kernels). \
+                        It is beneifical when batchxnum_heads cannot fully utilize GPU.'
     )
+    parser.add_argument('--remove_input_padding',
+                        default=False,
+                        action='store_true')
     parser.add_argument(
-        '--gather_all_token_logits',
-        action='store_true',
+        '--paged_kv_cache',
+        action="store_true",
         default=False,
-        help='Enable both gather_context_logits and gather_generation_logits')
-    parser.add_argument('--gather_context_logits',
+        help=
+        'By default we use contiguous KV cache. By setting this flag you enable paged KV cache'
+    )
+    parser.add_argument('--tokens_per_block',
+                        type=int,
+                        default=64,
+                        help='Number of tokens per block in paged KV cache')
+    parser.add_argument(
+        '--use_custom_all_reduce',
+        action='store_true',
+        help=
+        'Activates latency-optimized algorithm for all-reduce instead of NCCL.')
+    parser.add_argument('--gather_all_token_logits',
                         action='store_true',
-                        default=False,
-                        help='Gather context logits')
-    parser.add_argument('--gather_generation_logits',
-                        action='store_true',
-                        default=False,
-                        help='Gather generation logits')
+                        default=False)
     parser.add_argument('--strongly_typed', action='store_true', default=False)
-    parser.add_argument('--builder_opt', type=int, default=None)
-    parser.add_argument('--logits_dtype',
-                        type=str,
-                        default=None,
-                        choices=['float16', 'float32'])
-    parser.add_argument('--weight_only_precision',
-                        type=str,
-                        default=None,
-                        choices=['int8', 'int4'])
-    parser.add_argument(
-        '--max_draft_len',
-        type=int,
-        default=0,
-        help=
-        'Maximum lengths of draft tokens for speculative decoding target model.'
-    )
-
-    plugin_config_parser = parser.add_argument_group("plugin_config")
-    add_plugin_argument(plugin_config_parser)
 
     args = parser.parse_args()
-    if args.gather_all_token_logits:
-        args.gather_context_logits = True
-        args.gather_generation_logits = True
 
     return args
 
 
-def build_model(model: PretrainedModel, build_config: BuildConfig) -> Engine:
+def build_shard_model(model: PretrainedModel,
+                      build_config: BuildConfig) -> Engine:
     builder = Builder()
     builder_config = builder.create_builder_config(
         precision=model.config.dtype,
-        int8=(model.config.quant_mode.has_act_or_weight_quant()
-              and not model.config.quant_mode.has_per_group_scaling())
+        int8=model.config.quant_mode.has_act_or_weight_quant()
         or model.config.quant_mode.has_int8_kv_cache(),
         strongly_typed=build_config.strongly_typed,
-        opt_level=build_config.builder_opt,
-        profiling_verbosity=build_config.profiling_verbosity,
-        quant_mode=model.config.quant_mode,
-        lora_target_modules=model.config.lora_target_modules if hasattr(
-            model.config, 'lora_target_modules') else [],
-        hf_modules_to_trtllm_modules=model.config.lora_target_modules
-        if hasattr(model.config, 'hf_modules_to_trtllm_modules') else [],
-        trtllm_modules_to_hf_modules=model.config.lora_target_modules
-        if hasattr(model.config, 'trtllm_modules_to_hf_modules') else [],
-        max_lora_rank=model.config.max_lora_rank if hasattr(
-            model.config, 'max_lora_rank') else 64,
-    )
+        quant_mode=model.config.quant_mode)
 
     network = builder.create_network()
-    network.plugin_config = build_config.plugin_config
+    network._plugin_config = build_config.plugin_config
 
     use_weight_only = model.config.quant_mode.is_weight_only()
     per_group = model.config.quant_mode.has_per_group_scaling()
     use_smooth_quant = model.config.quant_mode.has_act_and_weight_quant()
-    disable_weight_only_quant_plugin = model.config.disable_weight_only_quant_plugin if hasattr(
-        model.config, 'disable_weight_only_quant_plugin') else False
-
-    if use_weight_only and not disable_weight_only_quant_plugin:
+    if use_weight_only:
         if per_group:
-            network.plugin_config.set_plugin(
-                "weight_only_groupwise_quant_matmul_plugin", model.config.dtype)
+            network.plugin_config.set_weight_only_groupwise_quant_matmul_plugin(
+                dtype='float16')
         else:
-            network.plugin_config.set_plugin("weight_only_quant_matmul_plugin",
-                                             model.config.dtype)
-    if use_smooth_quant and model.config.quant_kwargs.get(
-            'sq_use_plugin', False):
-        network.plugin_config.set_smooth_quant_plugins()
-    nccl_plugin = model.config.dtype if model.config.mapping.world_size > 1 else None
-    network.plugin_config.set_nccl_plugin(
-        nccl_plugin, network.plugin_config.use_custom_all_reduce)
+            network.plugin_config.set_weight_only_quant_matmul_plugin(
+                dtype='float16')
+    if use_smooth_quant:
+        network.plugin_config.set_smooth_quant_gemm_plugin(dtype='float16')
+        network.plugin_config.set_rmsnorm_quantization_plugin(dtype='float16')
+        network.plugin_config.set_layernorm_quantization_plugin(dtype='float16')
+        network.plugin_config.set_quantize_tensor_plugin()
+        network.plugin_config.set_quantize_per_token_plugin()
+    nccl_plugin = model.config.dtype if model.config.mapping.world_size > 1 else False
+    if nccl_plugin:
+        network.plugin_config.set_nccl_plugin(
+            nccl_plugin, network.plugin_config.use_custom_all_reduce)
 
     with net_guard(network):
         # Prepare
@@ -189,25 +169,11 @@ def build_model(model: PretrainedModel, build_config: BuildConfig) -> Engine:
 
         # Forward
         inputs = model.prepare_inputs(
-            max_batch_size=build_config.max_batch_size,
-            max_input_len=build_config.max_input_len,
-            max_seq_len=build_config.max_input_len +
-            build_config.max_output_len,
-            use_cache=True,
-            max_beam_width=build_config.max_beam_width,
-            max_num_tokens=build_config.max_num_tokens,
-            prompt_embedding_table_size=build_config.
-            max_prompt_embedding_table_size,
-            max_draft_len=build_config.max_draft_len,
-            gather_context_logits=build_config.gather_context_logits,
-            gather_generation_logits=build_config.gather_generation_logits,
-            lora_target_modules=model.config.lora_target_modules if hasattr(
-                model.config, 'lora_target_modules') else [])
+            build_config.max_batch_size, build_config.max_input_len,
+            build_config.max_output_len, True, build_config.max_beam_width,
+            build_config.max_num_tokens,
+            build_config.max_prompt_embedding_table_size)
         model(**inputs)
-
-        if build_config.enable_debug_output:
-            for k, v in model.named_network_outputs():
-                network._mark_output(v, k, str_dtype_to_trt(model.config.dtype))
 
     optimize(network)
 
@@ -218,13 +184,12 @@ def build_model(model: PretrainedModel, build_config: BuildConfig) -> Engine:
     return Engine(engine_config, engine)
 
 
-def build(build_config: BuildConfig,
+def build(build_config: Union[str, BuildConfig],
           rank: int = 0,
           ckpt_dir: str = None,
           model_config: Union[str, PretrainedConfig] = None,
           weights=None,
-          model_cls=None,
-          **kwargs) -> Engine:
+          model_cls=None) -> Engine:
     if ckpt_dir is not None:
         model_config = PretrainedConfig.from_json_file(
             os.path.join(ckpt_dir, 'config.json'))
@@ -235,23 +200,8 @@ def build(build_config: BuildConfig,
         else:
             model_config = PretrainedConfig.from_json_file(model_config)
 
-    logits_dtype = kwargs.pop('logits_dtype', None)
-    if logits_dtype is not None:
-        model_config.logits_dtype = logits_dtype
-
-    model_config.use_prompt_tuning = build_config.max_prompt_embedding_table_size > 0
-
-    weight_only_precision = kwargs.pop('weight_only_precision', None)
-    if model_config.quant_mode == QuantMode(
-            0) and weight_only_precision is not None:
-        if weight_only_precision == 'int4':
-            model_config.quant_mode = QuantMode.use_weight_only(
-                use_int4_weights=True)
-            model_config.quant_kwargs['quant_algo'] = W4A16
-        else:
-            model_config.quant_mode = QuantMode.use_weight_only(
-                use_int4_weights=False)
-            model_config.quant_kwargs['quant_algo'] = W8A16
+    if isinstance(build_config, str):
+        build_config = BuildConfig.from_json_file(build_config)
 
     assert rank < model_config.mapping.world_size
     architecture = model_config.architecture
@@ -262,184 +212,35 @@ def build(build_config: BuildConfig,
                 f'Unsupported model architecture: {architecture}')
         model_cls = MODEL_MAP[architecture]
 
-    rank_config = copy.deepcopy(model_config)
-    rank_config.set_rank(rank)
-
-    model = model_cls.from_config(rank_config)
     if ckpt_dir is not None:
-        model_path = os.path.join(ckpt_dir, f'rank{rank}.safetensors')
-        if os.path.isfile(model_path):
-            weights = {}
-            with safetensors.safe_open(model_path, framework='pt',
-                                       device='cpu') as f:
-                for key in f.keys():
-                    weights[key] = f.get_tensor(key)
-        else:
-            logger.warning(
-                f"Cannot find {model_path}. Use dummy model weights.")
-
-    if weights is not None:
-        preprocess_weights(weights, rank_config)
-        model.load(weights)
-
-    if model.config.quant_kwargs[
-            'quant_algo'] == FP8 or model.config.quant_kwargs[
-                'kv_cache_quant_algo'] == FP8:
-        build_config.strongly_typed = True
-
-    if hasattr(model.config, 'max_medusa_token_len'):
-        build_config.max_draft_len = model.config.max_medusa_token_len
-
-    use_fused_mlp = kwargs.pop('use_fused_mlp', False)
-    model = optimize_model(model, use_fused_mlp=use_fused_mlp)
-
-    return build_model(model, build_config)
+        model = model_cls.from_checkpoint(ckpt_dir, rank=rank)
+    else:
+        rank_config = copy.deepcopy(model_config)
+        rank_config.set_rank(rank)
+        model = model_cls.from_config(rank_config)
+        if weights is not None:
+            model.load(weights)
+    return build_shard_model(model, build_config)
 
 
-def preprocess_weights(
-        weights: Dict[str, torch.Tensor],
-        model_config: PretrainedConfig) -> Dict[str, torch.Tensor]:
-    quant_algo = model_config.quant_kwargs['quant_algo']
-    kv_cache_quant_algo = model_config.quant_kwargs['kv_cache_quant_algo']
-
-    # INT4_AWQ
-    if quant_algo == W4A8_AWQ or quant_algo == W4A16_AWQ:
-        preprocessor = torch.ops.trtllm.preprocess_weights_for_mixed_gemm
-        for name, param in weights.items():
-            if name.endswith('weight') and param.dtype == torch.int8:
-                weights[name] = preprocessor(param.T.contiguous(),
-                                             torch.quint4x2).view(torch.float16)
-            if name.endswith('weights_scaling_factor'):
-                weights[name] = param.T.contiguous().to(
-                    str_dtype_to_torch(model_config.dtype))
-            if name.endswith('prequant_scaling_factor'):
-                weights[name] = param.reshape(1, -1)
-            if model_config.mapping.tp_rank > 0:
-                if name.endswith('attention.dense.bias') or name.endswith(
-                        'mlp.proj.bias'):
-                    weights[name] = torch.zeros_like(param)
-
-        if quant_algo == W4A8_AWQ:
-            for name in list(weights):
-                if name.endswith('weights_scaling_factor'):
-                    activation_scaling_factor = weights.pop(
-                        name.replace('weights_scaling_factor',
-                                     'activation_scaling_factor'))
-                    weights_scaling_factor_2 = weights.pop(
-                        name.replace('weights_scaling_factor',
-                                     'weights_scaling_factor_2'))
-                    weights[name] /= weights_scaling_factor_2
-                    weights[name.replace(
-                        'weights_scaling_factor',
-                        'prequant_scaling_factor')] /= activation_scaling_factor
-                    weights[name.replace(
-                        'weights_scaling_factor', 'alpha'
-                    )] = activation_scaling_factor * weights_scaling_factor_2
-
-    # FP8
-    elif quant_algo == FP8:
-        for name, param in weights.items():
-            if name.endswith('weight') and param.dtype == torch.int8:
-                weights[name] = param.view(torch.float8_e4m3fn)
-        # lm_head is not quantized to FP8
-        if "lm_head.weight" in weights:
-            assert weights['lm_head.weight'].dtype == str_dtype_to_torch(
-                model_config.dtype)
-        weights.pop('lm_head.weights_scaling_factor', None)
-        weights.pop('lm_head.activation_scaling_factor', None)
-
-    # Weight only 4bit
-    elif quant_algo == W4A16:
-        for name in list(weights):
-            if any([
-                    _name in name for _name in [
-                        'qkv.weight', 'dense.weight', 'fc.weight',
-                        'proj.weight', 'gate.weight'
-                    ]
-            ]) and weights[name].dtype != torch.int8:
-                processed_torch_weights, torch_weight_scales = \
-            torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix(
-                weights[name].t().contiguous(), torch.quint4x2)
-                weights[name] = processed_torch_weights
-                weights[name.replace(
-                    '.weight', '.per_channel_scale')] = torch_weight_scales
-
-    # Weight only 8bit
-    elif quant_algo == W8A16:
-        for name in list(weights):
-            if any([
-                    _name in name for _name in [
-                        'qkv.weight', 'dense.weight', 'fc.weight',
-                        'proj.weight', 'gate.weight'
-                    ]
-            ]) and weights[name].dtype != torch.int8:
-                processed_torch_weights, torch_weight_scales = \
-            torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix(
-                weights[name].t().contiguous(), torch.int8)
-                weights[name] = processed_torch_weights
-                weights[name.replace(
-                    '.weight', '.per_channel_scale')] = torch_weight_scales
-
-    # FP8 kv_cache_scaling_factor is always 1.0
-    if kv_cache_quant_algo == FP8:
-        for name, param in weights.items():
-            if name.endswith('kv_cache_scaling_factor'):
-                weights[name] = torch.tensor([1.0], dtype=torch.float32)
-
-    # If layer_norm bias is None. (For MPT)
-    if model_config.architecture == 'MPTForCausalLM':
-        update_dict = {}
-        for name, param in weights.items():
-            if 'input_layernorm.weight' in name and name.replace(
-                    'weight', 'bias') not in weights:
-                update_dict[name.replace('weight',
-                                         'bias')] = torch.zeros_like(param)
-            if 'post_layernorm.weight' in name and name.replace(
-                    'weight', 'bias') not in weights:
-                update_dict[name.replace('weight',
-                                         'bias')] = torch.zeros_like(param)
-            if 'ln_f.weight' in name and name.replace('weight',
-                                                      'bias') not in weights:
-                update_dict[name.replace('weight',
-                                         'bias')] = torch.zeros_like(param)
-        weights.update(update_dict)
-
-    # For shared embedding.
-    if model_config.mapping.is_last_pp_rank(
-    ) and 'lm_head.weight' not in weights:
-        weights["lm_head.weight"] = weights[
-            "transformer.vocab_embedding.weight"].clone()
-
-    # Parallel block rowlinear should not have duplicate bias.
-    if model_config.architecture == 'GPTJForCausalLM':
-        if model_config.mapping.tp_rank > 0:
-            for name, param in weights.items():
-                if 'attention.dense.bias' in name or 'mlp.proj.bias' in name:
-                    weights[name] = torch.zeros_like(param)
-
-
-def build_and_save(rank, gpu_id, ckpt_dir, build_config, output_dir, log_level,
-                   model_config, model_cls, **kwargs):
+def build_and_save_shard(rank, gpu_id, ckpt_dir, build_config, output_dir,
+                         log_level, model_config, model_cls):
     torch.cuda.set_device(gpu_id)
     logger.set_level(log_level)
     engine = build(build_config,
                    rank,
                    ckpt_dir,
                    model_config,
-                   model_cls=model_cls,
-                   **kwargs)
-    assert engine is not None
+                   model_cls=model_cls)
     engine.save(output_dir)
-    return True
 
 
-def parallel_build(ckpt_dir_or_model_config: str,
-                   build_config: BuildConfig,
+def build_and_save(ckpt_dir_or_model_config: str,
+                   build_config: Union[str, BuildConfig],
                    output_dir: str,
                    workers: int = 1,
                    log_level: str = 'info',
-                   model_cls=None,
-                   **kwargs):
+                   model_cls=None):
     ckpt_dir = ckpt_dir_or_model_config
     if ckpt_dir_or_model_config.lower().endswith('.json'):
         model_config = PretrainedConfig.from_json_file(ckpt_dir_or_model_config)
@@ -450,28 +251,18 @@ def parallel_build(ckpt_dir_or_model_config: str,
 
     if workers == 1:
         for rank in range(model_config.mapping.world_size):
-            passed = build_and_save(rank, rank % workers, ckpt_dir,
-                                    build_config, output_dir, log_level,
-                                    model_config, model_cls, **kwargs)
-            assert passed, "Engine building failed, please check error log."
+            build_and_save_shard(rank, rank % workers, ckpt_dir, build_config,
+                                 output_dir, log_level, model_config, model_cls)
     else:
         with ProcessPoolExecutor(mp_context=get_context('spawn'),
                                  max_workers=workers) as p:
             futures = [
-                p.submit(build_and_save, rank, rank % workers, ckpt_dir,
+                p.submit(build_and_save_shard, rank, rank % workers, ckpt_dir,
                          build_config, output_dir, log_level, model_config,
-                         model_cls, **kwargs)
+                         model_cls)
                 for rank in range(model_config.mapping.world_size)
             ]
-            exceptions = []
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    traceback.print_exc()
-                    exceptions.append(e)
-            assert len(exceptions
-                       ) == 0, "Engine building failed, please check error log."
+            wait(futures)
 
 
 def main():
@@ -491,45 +282,42 @@ def main():
 
     workers = min(torch.cuda.device_count(), args.workers)
 
-    plugin_config = PluginConfig.from_arguments(args)
+    build_config = args.build_config
     if args.build_config is None:
-        args.max_num_tokens = check_max_num_tokens(
-            max_num_tokens=args.max_num_tokens,
-            max_batch_size=args.max_batch_size,
-            max_input_len=args.max_input_len,
-            remove_input_padding=(args.remove_input_padding == "enable"),
-            enable_context_fmha=(args.context_fmha == "enable"),
-            tokens_per_block=args.tokens_per_block)
-        build_config = BuildConfig.from_dict(
-            {
-                'max_input_len': args.max_input_len,
-                'max_output_len': args.max_output_len,
-                'max_batch_size': args.max_batch_size,
-                'max_beam_width': args.max_beam_width,
-                'max_num_tokens': args.max_num_tokens,
-                'max_prompt_embedding_table_size':
-                args.max_prompt_embedding_table_size,
-                'gather_context_logits': args.gather_context_logits,
-                'gather_generation_logits': args.gather_generation_logits,
-                'strongly_typed': args.strongly_typed,
-                'builder_opt': args.builder_opt,
-                'profiling_verbosity': args.profiling_verbosity,
-                'enable_debug_output': args.enable_debug_output,
-                'max_draft_len': args.max_draft_len,
-            },
-            plugin_config=plugin_config)
-    else:
-        build_config = BuildConfig.from_json_file(args.build_config,
-                                                  plugin_config=plugin_config)
+        build_config = BuildConfig.from_dict({
+            'max_input_len':
+            args.max_input_len,
+            'max_output_len':
+            args.max_output_len,
+            'max_batch_size':
+            args.max_batch_size,
+            'max_beam_width':
+            args.max_beam_width,
+            'max_num_tokens':
+            args.max_num_tokens,
+            'max_prompt_embedding_table_size':
+            args.max_prompt_embedding_table_size,
+            'gather_all_token_logits':
+            args.gather_all_token_logits,
+            'strongly_typed':
+            args.strongly_typed,
+            'plugin_config': {
+                'gpt_attention_plugin': args.use_gpt_attention_plugin,
+                'gemm_plugin': args.use_gemm_plugin,
+                'enable_context_fmha': args.enable_context_fmha,
+                'enable_context_fmha_fp32_acc':
+                args.enable_context_fmha_fp32_acc,
+                'remove_input_padding': args.remove_input_padding,
+                'paged_kv_cache': args.paged_kv_cache,
+                'tokens_per_block': args.tokens_per_block,
+                'lookup_plugin': args.use_lookup_plugin,
+                'use_custom_all_reduce': args.use_custom_all_reduce,
+            }
+        })
 
     source = args.checkpoint_dir if args.checkpoint_dir is not None else args.model_config
-    kwargs = {
-        'logits_dtype': args.logits_dtype,
-        'use_fused_mlp': args.use_fused_mlp,
-        'weight_only_precision': args.weight_only_precision,
-    }
-    parallel_build(source, build_config, args.output_dir, workers,
-                   args.log_level, model_cls, **kwargs)
+    build_and_save(source, build_config, args.output_dir, workers,
+                   args.log_level, model_cls)
 
     tok = time.time()
     t = time.strftime('%H:%M:%S', time.gmtime(tok - tik))

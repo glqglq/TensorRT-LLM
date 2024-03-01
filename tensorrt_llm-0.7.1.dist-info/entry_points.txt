@@ -1,0 +1,2 @@
+[console_scripts]
+trtllm-build = tensorrt_llm.commands.build:main

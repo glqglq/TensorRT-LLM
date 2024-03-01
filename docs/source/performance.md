@@ -48,7 +48,7 @@ This data has been updated for v0.6.1, unless specified.
 <sup> * The following data is from TensorRT-LLM v0.5. </sup>
 
 
-| Model                        | Batch Size | TP (1)    | Input Length | Output Length | Throughput (out tok/s/GPU) |
+| Model                        | Batch Size | TP (1)    | Input Length | Output Length | Throughput (out tok/s) |
 | :--------------------------- | :--------- | :-------- | :----------- | :------------ | ---------------------: |
 | GPT-J 6B                     | 64         | 1         | 128          | 128           |                  3,630 |
 | GPT-J 6B                     | 64         | 1         | 128          | 2048          |                  1,859 |
@@ -63,7 +63,7 @@ This data has been updated for v0.6.1, unless specified.
 
 ### A100 GPUs (FP16)
 
-| Model                        | Batch Size | TP (1)    | Input Length | Output Length | Throughput (out tok/s/GPU) |
+| Model                        | Batch Size | TP (1)    | Input Length | Output Length | Throughput (out tok/s) |
 | :--------------------------- | :--------- | :-------- | :----------- | :------------ | ---------------------: |
 | GPT-J 6B                     | 512        | 1         | 128          | 128           |                  6,374 |
 | GPT-J 6B                     | 120        | 2         | 128          | 2048          |                  2,192 |
@@ -224,14 +224,8 @@ numbers we document on our [Performance section](#performance of-tensorrt-llm).
 
 ### Running on A100
 
-To run the benchmarks below on A100, you will need to remove the below fp8 quantization field from each
-config json file, because FP8 computation is a feature in H100 and newer GPUs.
-```json
-"quantization": {
-	"quant_algo": "FP8",
-	"kv_cache_quant_algo": "FP8"
-}
-```
+To run the benchmarks below on A100, you will need to remove the `--enable_fp8 --fp8_kv_cache` options
+from each engine build command because FP8 computation is a feature in H100 and newer GPUs.
 
 ### Reproducing First Token Latency
 
@@ -244,49 +238,29 @@ in [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM).
 
 ## Benchmarking per Model
 
-> [!WARNING]
-> In some cases, using Group Query Attention (GQA) can improve performance of some networks. These
-kernels are currently experimental and not enabled by default. In order to enable them, simply run
-`export TRTLLM_ENABLE_XQA=1` in your shell. The kernels are an inference runtime optimization, so
-previously built engines should still function. For the benchmarks below, we have enabled GQA where
-our tests displayed performance benefits. If your network is not listed below, be sure to try both
-GQA-enabled and GQA-disabled configurations to find the configuration that works best.
-For more details see our documentation about [GPT Attention](./gpt_attention.md#generation-phase).
-
 ### GPT-J 6B
 
 ---
-Prepare a config json file `/tmp/engines/gptj/ckpt_config.json`:
-```json
-{
-    "architecture": "GPTJForCausalLM",
-    "dtype": "float16",
-    "num_hidden_layers": 28,
-    "num_attention_heads": 16,
-    "hidden_size": 4096,
-    "norm_epsilon": 1e-05,
-    "vocab_size": 50400,
-    "position_embedding_type": "rope_gptj",
-    "max_position_embeddings": 2048,
-    "hidden_act": "gelu",
-    "quantization": {
-        "quant_algo": "FP8",
-        "kv_cache_quant_algo": "FP8"
-    },
-    "rotary_dim": 64
-}
-```
-
-Build an engine:
 ```shell
-trtllm-build --model_config /tmp/engines/gptj/ckpt_config.json \
+python examples/gptj/build.py \
+	--enable_context_fmha \
+	--parallel_build \
 	--output_dir /tmp/engines/gptj \
-	--context_fmha enable \
-	--gpt_attention_plugin float16 \
+	--dtype float16 \
+	--use_gpt_attention_plugin float16 \
+	--world_size 1 \
 	--max_batch_size 64 \
 	--max_input_len 2048 \
 	--max_output_len 2048 \
-	--strongly_typed
+	--hidden_act gelu \
+	--enable_fp8 \
+	--fp8_kv_cache \
+	--strongly_typed \
+	--n_layer 28 \
+	--n_head 16 \
+	--n_embd 4096 \
+	--n_positions 2048 \
+	--enable_two_optimization_profiles
 ```
 
 #### Throughput Benchmark
@@ -321,42 +295,31 @@ done
 ### Llama2-7b
 
 ---
-Prepare a config json file `/tmp/engines/llama/7b/ckpt_config.json`:
-```json
-{
-    "architecture": "LlamaForCausalLM",
-    "dtype": "float16",
-    "num_hidden_layers": 32,
-    "num_attention_heads": 32,
-    "hidden_size": 4096,
-    "intermediate_size": 11008,
-    "num_key_value_heads": 32,
-    "vocab_size": 32000,
-    "position_embedding_type": "rope_gpt_neox",
-    "max_position_embeddings": 4096,
-    "hidden_act": "silu",
-    "rotary_base": 10000.0,
-    "rotary_scaling": null,
-    "norm_epsilon": 1e-05,
-    "quantization": {
-        "quant_algo": "FP8",
-        "kv_cache_quant_algo": "FP8"
-    }
-}
-```
-
-Build an engine:
 ```shell
 pip install -r examples/llama/requirements.txt
-trtllm-build --model_config /tmp/engines/llama/7b/ckpt_config.json \
+python examples/llama/build.py \
+	--remove_input_padding \
+	--enable_context_fmha \
+	--parallel_build \
 	--output_dir /tmp/engines/llama/7b \
-	--remove_input_padding enable \
-	--context_fmha enable \
-	--gpt_attention_plugin float16 \
+	--dtype float16 \
+	--use_gpt_attention_plugin float16 \
+	--world_size 1 \
+	--tp_size 1 \
+	--pp_size 1 \
 	--max_batch_size 64 \
 	--max_input_len 2048 \
 	--max_output_len 2048 \
-	--strongly_typed
+	--enable_fp8 \
+	--fp8_kv_cache \
+	--strongly_typed \
+	--n_layer 32 \
+	--n_head 32 \
+	--n_embd 4096 \
+	--inter_size 11008 \
+	--vocab_size 32000 \
+	--n_positions 4096 \
+	--hidden_act silu
 ```
 
 #### Throughput Benchmark
@@ -388,55 +351,39 @@ done
 
 ### Llama2-70b
 
----
-Prepare a config json file `/tmp/engines/llama/70b/ckpt_config.json`:
-```json
-{
-    "architecture": "LlamaForCausalLM",
-    "dtype": "float16",
-    "num_hidden_layers": 80,
-    "num_attention_heads": 64,
-    "hidden_size": 8192,
-    "intermediate_size": 28672,
-    "num_key_value_heads": 8,
-    "vocab_size": 32000,
-    "position_embedding_type": "rope_gpt_neox",
-    "max_position_embeddings": 4096,
-    "hidden_act": "silu",
-    "rotary_base": 10000.0,
-    "rotary_scaling": null,
-    "norm_epsilon": 1e-05,
-    "quantization": {
-        "quant_algo": "FP8",
-        "kv_cache_quant_algo": "FP8"
-    },
-    "mapping": {
-        "world_size": 4,
-        "tp_size": 4,
-        "pp_size": 1
-    }
-}
-```
-
-Build an engine:
 ```shell
 pip install -r examples/llama/requirements.txt
-trtllm-build --model_config /tmp/engines/llama/70b/ckpt_config.json \
+python examples/llama/build.py \
+	--remove_input_padding \
+	--enable_context_fmha \
+	--parallel_build \
 	--output_dir /tmp/engines/llama/70b \
-	--workers 4 \
-	--remove_input_padding enable \
-	--context_fmha enable \
-	--gpt_attention_plugin float16 \
+	--dtype float16 \
+	--use_gpt_attention_plugin float16 \
+	--world_size 4 \
+	--tp_size 4 \
+	--pp_size 1 \
 	--max_batch_size 64 \
 	--max_input_len 2048 \
 	--max_output_len 2048 \
-	--strongly_typed
+	--enable_fp8 \
+	--fp8_kv_cache \
+	--strongly_typed \
+	--n_layer 80 \
+	--n_head 64 \
+	--n_kv_head 8 \
+	--n_embd 8192 \
+	--inter_size 28672 \
+	--vocab_size 32000 \
+	--n_positions 4096 \
+	--hidden_act silu \
+	--ffn_dim_multiplier 1.3 \
+	--multiple_of 4096
 ```
 
 #### Throughput Benchmark
 
 ```shell
-export TRTLLM_ENABLE_XQA=1
 in_out_sizes=("64:128,128" "64:128,2048" "64:2048,128" "64:2048,2048")
 for in_out in ${in_out_sizes[@]}
 do
@@ -451,7 +398,6 @@ done
 #### First Token Latency Benchmark
 
 ```shell
-export TRTLLM_ENABLE_XQA=1
 in_out_sizes=("64:128,1" "64:128,1")
 for in_out in ${in_out_sizes[@]}
 do
@@ -472,40 +418,7 @@ Benchmarking Falcon-180B requires a custom engine per batch size, input/output s
 to the large footprint of the model and the large input size of 2048. You can build and benchmark
 each engine one at a time with the following loop.
 
-Prepare a config json file `/tmp/engines/falcon/180b/ckpt_config.json`:
-```json
-{
-    "architecture": "FalconForCausalLM",
-    "dtype": "float16",
-    "num_hidden_layers": 80,
-    "num_attention_heads": 232,
-    "num_key_value_heads": 8,
-    "hidden_size": 14848,
-    "norm_epsilon": 1e-05,
-    "vocab_size": 65024,
-    "position_embedding_type": "rope_gpt_neox",
-    "max_position_embeddings": 2048,
-    "hidden_act": "gelu",
-    "use_parallel_embedding": false,
-    "embedding_sharding_dim": 0,
-    "share_embedding_table": false,
-    "quantization": {
-        "quant_algo": "FP8",
-        "kv_cache_quant_algo": "FP8"
-    },
-    "mapping": {
-        "world_size": 8,
-        "tp_size": 8,
-        "pp_size": 1
-    },
-    "bias": false,
-    "parallel_attention": true,
-    "new_decoder_architecture": true
-}
-```
-
 ```shell
-export TRTLLM_ENABLE_XQA=1
 # Benchmark specific batch size:isl:osl combinations.
 in_out_sizes=("96:128,128" "96:128,2048" "64:2048,128")
 for in_out in ${in_out_sizes[@]}
@@ -518,19 +431,29 @@ do
 	echo "BS: $batch_size, ISL/OSL: ${isl},${osl}"
 
 	# Build the specific engine for the BS,ISL,OSL combination
-	trtllm-build --model_config /tmp/engines/falcon/180b/ckpt_config.json \
+	python examples/falcon/build.py \
+		--use_inflight_batching \
+		--paged_kv_cache \
+		--remove_input_padding \
+		--enable_context_fmha \
+		--parallel_build \
 		--output_dir $engine_path \
-		--workers 8 \
-		--remove_input_padding enable \
-		--context_fmha enable \
-		--gpt_attention_plugin float16 \
-		--gemm_plugin float16 \
-		--paged_kv_cache enable \
+		--dtype float16 \
+		--use_gemm_plugin float16 \
+		--use_gpt_attention_plugin float16 \
+		--world_size 8 \
+		--tp 8 \
 		--max_batch_size $batch_size \
 		--max_input_len $isl \
 		--max_output_len $osl \
-		--strongly_typed
-
+		--enable_fp8 \
+		--fp8_kv_cache \
+		--n_layer 80 \
+		--n_head 232 \
+		--n_kv_head 8 \
+		--n_embd 14848 \
+		--vocab_size 65024 \
+		--new_decoder_architecture
 	# Throughput benchmark
 	mpirun -n 8 --allow-run-as-root --oversubscribe ./cpp/build/benchmarks/gptSessionBenchmark --model falcon --engine_dir $engine_path --warm_up 1 --batch_size $batch_size --duration 0 --num_runs 5 --input_output_len "${isl},${osl}"
 	# Time to first token benchmark

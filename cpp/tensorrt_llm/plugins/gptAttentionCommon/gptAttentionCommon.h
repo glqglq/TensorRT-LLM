@@ -36,18 +36,17 @@ class GPTAttentionPluginCommon : public BasePlugin
 public:
     GPTAttentionPluginCommon() = delete;
 
-    GPTAttentionPluginCommon(int layer_idx, int num_heads, int num_kv_heads, int head_size, int unidirectional,
-        float q_scaling, tensorrt_llm::kernels::PositionEmbeddingType position_embedding_type,
+    GPTAttentionPluginCommon(int num_heads, int num_kv_heads, int head_size, int unidirectional, float q_scaling,
+        tensorrt_llm::kernels::PositionEmbeddingType position_embedding_type,
         int rotary_embedding_dim, // for RoPE. Use 0 for non-RoPE
         float rotary_embedding_base, tensorrt_llm::kernels::RotaryScalingType rotary_embedding_scale_type,
         float rotary_embedding_scale, int rotary_embedding_max_positions, int tp_size, int tp_rank, // for ALiBi
         bool unfuse_qkv_gemm,                                                                       // for AutoPP
-        tensorrt_llm::kernels::ContextFMHAType context_fmha_type, bool multi_block_mode, bool enable_xqa,
-        int kv_cache_quant_mode, bool remove_input_padding, tensorrt_llm::kernels::AttentionMaskType mask_type,
-        bool paged_kv_cache, int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length,
-        bool qkv_bias_enabled, bool cross_attention = false, int max_distance = 0, bool pos_shift_enabled = false,
-        bool dense_context_fmha = false, bool use_paged_context_fmha = false, bool use_cache = true,
-        bool is_medusa_enabled = false);
+        tensorrt_llm::kernels::ContextFMHAType context_fmha_type, bool multi_block_mode, int kv_cache_quant_mode,
+        bool remove_input_padding, tensorrt_llm::kernels::AttentionMaskType mask_type, bool paged_kv_cache,
+        int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length, bool qkv_bias_enabled,
+        bool cross_attention = false, int max_distance = 0, bool pos_shift_enabled = false,
+        bool dense_context_fmha = false, bool use_paged_context_fmha = false, bool use_cache = true);
 
     GPTAttentionPluginCommon(const void* data, size_t length);
 
@@ -79,7 +78,7 @@ public:
 protected:
     int getMaxNumSeqLenTile(int batch_beam_size = 1) const;
     size_t getWorkspaceSizeForContext(nvinfer1::DataType type, int32_t nbReq, int32_t max_input_length,
-        int32_t max_kv_cache_len, int32_t cross_qkv_length = 0, int32_t max_num_tokens = 0) const noexcept;
+        int32_t max_kv_cache_len, int32_t cross_qkv_length = 0) const noexcept;
     // total_num_seq is the sum of beam_width for multiple requests
     size_t getWorkspaceSizeForGeneration(
         nvinfer1::DataType type, int32_t total_num_seq, int32_t max_kv_cache_length) const noexcept;
@@ -129,8 +128,6 @@ protected:
     {
         T const* attention_input;
         T const* qkv_bias;
-        // NOTE: input_seq_length might be larger than one in the medusa mode.
-        int32_t input_seq_length;
         int32_t const* sequence_lengths;
         int32_t past_kv_length;
         int32_t beam_width;
@@ -159,22 +156,14 @@ protected:
         // optional when cross attention
         int32_t const* encoder_input_lengths = nullptr;
         int32_t const* host_context_lengths = nullptr;
-        // optional when medusa is used.
-        const bool* medusa_mask = nullptr;
-        const int32_t* medusa_packed_mask = nullptr;
-        const int32_t* medusa_position_offsets = nullptr;
     };
 
     template <typename T, typename KVCacheBuffer>
     int enqueueGeneration(const EnqueueGenerationParams<T, KVCacheBuffer>& params, cudaStream_t stream);
 
-    // Called in configurePlugin().
-    template <typename T, typename KVCacheBuffer>
-    void prepareEnqueueGeneration(const EnqueueGenerationParams<T, KVCacheBuffer>& params);
-
     template <typename T, typename KVCacheBuffer>
     bool convertMMHAParamsToXQAParams(tensorrt_llm::kernels::XQAParams& xqaParams,
-        const EnqueueGenerationParams<T, KVCacheBuffer>& generationsParams, bool forConfigurePlugin);
+        const EnqueueGenerationParams<T, KVCacheBuffer>& generationsParams);
 
     bool isRelativePosition() const
     {
@@ -213,7 +202,6 @@ protected:
 
     const std::string mLayerName;
 
-    int mLayerIdx;
     int mNumHeads;
     int mNumKVHeads;
     int mHeadSize;
@@ -227,9 +215,8 @@ protected:
     tensorrt_llm::kernels::PositionEmbeddingType mPositionEmbeddingType;
     bool mRemovePadding = false;
     tensorrt_llm::kernels::AttentionMaskType mMaskType;
-    // NOTE: default values for paged kv cache.
     bool mPagedKVCache = false;
-    int mTokensPerBlock = 0;
+    int mTokensPerBlock;
     tensorrt_llm::common::QuantMode mKVCacheQuantMode;
     int mTpSize = 1;
     int mTpRank = 0;
@@ -242,11 +229,6 @@ protected:
     bool mPosShiftEnabled = false;
     bool mPagedContextFMHA = false;
     bool mDenseContextFMHA = false;
-    bool mIsMedusaEnabled = false;
-
-    // Medusa packed mask.
-    uint4* mMedusaPackedMask;
-    uint4* mMedusaPackedHostMask;
 
     // fmha runner (disable by default)
     // flag: disabled = 0, enabled = 1, enabled with fp32 accumulation = 2
@@ -263,7 +245,6 @@ protected:
     int2 mLaunchGridBlockCache = make_int2(0, 0);
 
     bool mMultiBlockMode;
-    bool mEnableXQA;
     int mDeviceId = -1;
     static bool mForceMultiBlockWarned;
     // The default copy constructor will leave it as nullptr. clone() shall initialize it.

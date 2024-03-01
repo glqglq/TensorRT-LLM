@@ -19,14 +19,16 @@
 #include "namedTensor.h"
 #include "tensorrt_llm/batch_manager/GptManager.h"
 #include "tensorrt_llm/batch_manager/callbacks.h"
-#include "tensorrt_llm/common/assert.h"
-#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/pybind/utils/pathCaster.h"
 
 #include <pybind11/functional.h>
+#include <pybind11/operators.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
+#include <ATen/ATen.h>
+
+#include <ATen/ops/tensor.h>
 #include <memory>
 #include <optional>
 
@@ -36,40 +38,30 @@ namespace tensorrt_llm::pybind::batch_manager
 {
 
 GptManager::GptManager(std::filesystem::path const& trtEnginePath, tb::TrtGptModelType modelType, int32_t maxBeamWidth,
-    tb::batch_scheduler::SchedulerPolicy schedulerPolicy, GetInferenceRequestsCallback const& getInferenceRequestsCb,
-    SendResponseCallback const& sendResponseCb, const tb::PollStopSignalCallback& pollStopSignalCb,
-    tb::ReturnBatchManagerStatsCallback const& returnBatchManagerStatsCb,
-    tb::TrtGptModelOptionalParams const& optionalParams, std::optional<uint64_t> terminateReqId)
+    tb::batch_scheduler::SchedulerPolicy schedulerPolicy, GetInferenceRequestsCallback getInferenceRequestsCb,
+    SendResponseCallback sendResponseCb, tb::PollStopSignalCallback pollStopSignalCb,
+    tb::ReturnBatchManagerStatsCallback returnBatchManagerStatsCb, const tb::TrtGptModelOptionalParams& optionalParams,
+    std::optional<uint64_t> terminateReqId)
+    : tb::GptManager(trtEnginePath, modelType, maxBeamWidth, schedulerPolicy, callbackAdapter(getInferenceRequestsCb),
+        callbackAdapter(sendResponseCb), pollStopSignalCb, returnBatchManagerStatsCb, optionalParams, terminateReqId)
 {
-    mManager = std::make_unique<tb::GptManager>(trtEnginePath, modelType, maxBeamWidth, schedulerPolicy,
-        callbackAdapter(getInferenceRequestsCb), callbackAdapter(sendResponseCb), pollStopSignalCb,
-        returnBatchManagerStatsCb, optionalParams, terminateReqId);
 }
 
 py::object GptManager::enter()
 {
-    TLLM_CHECK(static_cast<bool>(mManager));
     return py::cast(this);
 }
 
 void GptManager::exit(py::handle type, py::handle value, py::handle traceback)
 {
-    shutdown();
-}
-
-void GptManager::shutdown()
-{
     // NOTE: we must release the GIL here. GptManager has spawned a thread for the execution loop. That thread must be
     // able to do forward progress for the shutdown process to succeed. It takes the GIL during its callbacks, so
     // we release it now. Note that we shouldn't do anything related to python objects after that.
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     py::gil_scoped_release release;
-    mManager->shutdown();
-    mManager = nullptr;
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    shutdown();
 }
 
-tb::GetInferenceRequestsCallback callbackAdapter(GetInferenceRequestsCallback const& callback)
+tb::GetInferenceRequestsCallback callbackAdapter(GetInferenceRequestsCallback callback)
 {
     return [callback](int32_t max_sequences)
     {
@@ -85,14 +77,14 @@ tb::GetInferenceRequestsCallback callbackAdapter(GetInferenceRequestsCallback co
     };
 }
 
-tb::SendResponseCallback callbackAdapter(SendResponseCallback const& callback)
+tb::SendResponseCallback callbackAdapter(SendResponseCallback callback)
 {
     return [callback](uint64_t id, std::list<tb::NamedTensor> const& cppTensors, bool isOk, const std::string& errMsg)
     {
         std::list<NamedTensor> pythonList{};
         for (const auto& cppNamedTensor : cppTensors)
         {
-            pythonList.emplace_back(cppNamedTensor);
+            pythonList.push_back(NamedTensor{cppNamedTensor});
         }
         callback(id, pythonList, isOk, errMsg);
     };
@@ -110,7 +102,17 @@ void GptManager::initBindings(py::module_& m)
             py::arg_v("optional_params", tb::TrtGptModelOptionalParams(), "TrtGptModelOptionalParams"),
             py::arg("terminate_req_id") = std::nullopt)
 
-        .def("shutdown", &GptManager::shutdown)
+        // Note: attempting to bind &GptManager::shutdown() will result in a compiler error:
+        //
+        //  pybind11.h:1482:56: error: static assertion failed: Cannot bind an inaccessible base class method; use a
+        //  lambda definition instead 1482 |         detail::is_accessible_base_of<Class, Derived>::value,
+        //      |                                                        ^~~~~
+        //
+        // The issue is that the parent class has no bindings and is therefore not visible to pybind11.
+        // To resolve, we can add something like:
+        //
+        //  py::class_<tensorrt_llm::batch_manager::GptManager>(m, "_GptManagerBase");
+        .def("shutdown", [](GptManager& self) { self.shutdown(); })
         .def("__enter__", &GptManager::enter)
         .def("__exit__", &GptManager::exit);
 }

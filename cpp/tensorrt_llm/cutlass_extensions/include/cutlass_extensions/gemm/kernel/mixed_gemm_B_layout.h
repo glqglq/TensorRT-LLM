@@ -80,8 +80,7 @@ struct LayoutDetailsB<bfloat16_t, Arch, typename platform::enable_if<Arch::kMinC
 // Specializations for Turing+ when B is quantized. These can use the operator OpMultiplyAddDequantizeInterleavedBToA,
 // which signals that we want to dequantize after loading from smem.
 template <typename Arch>
-    struct LayoutDetailsB < uint8_t,
-    Arch, typename platform::enable_if<Arch::kMinComputeCapability >= 75 && Arch::kMinComputeCapability<90>::type>
+struct LayoutDetailsB<uint8_t, Arch, typename platform::enable_if<Arch::kMinComputeCapability >= 75>::type>
 {
     static constexpr int ThreadblockK = 64;
 
@@ -96,8 +95,7 @@ public:
 };
 
 template <typename Arch>
-    struct LayoutDetailsB < uint4b_t,
-    Arch, typename platform::enable_if<Arch::kMinComputeCapability >= 75 && Arch::kMinComputeCapability<90>::type>
+struct LayoutDetailsB<uint4b_t, Arch, typename platform::enable_if<Arch::kMinComputeCapability >= 75>::type>
 {
     static constexpr int ThreadblockK = 64;
 
@@ -109,24 +107,6 @@ public:
     using Layout = layout::ColumnMajorTileInterleave<ThreadblockK, ColumnsInterleaved>;
     static constexpr int ElementsPerAccess = 128 / cutlass::sizeof_bits<uint4b_t>::value;
     using Operator = cutlass::arch::OpMultiplyAddDequantizeInterleavedBToA;
-};
-
-template <typename Arch>
-struct LayoutDetailsB<uint8_t, Arch, typename platform::enable_if<Arch::kMinComputeCapability >= 90>::type>
-{
-    static constexpr int ThreadblockK = 64;
-    using Layout = layout::ColumnMajor;
-    static constexpr int ElementsPerAccess = 128 / cutlass::sizeof_bits<half_t>::value;
-    using Operator = cutlass::arch::OpMultiplyAdd;
-};
-
-template <typename Arch>
-struct LayoutDetailsB<uint4b_t, Arch, typename platform::enable_if<Arch::kMinComputeCapability >= 90>::type>
-{
-    static constexpr int ThreadblockK = 64;
-    using Layout = layout::ColumnMajor;
-    static constexpr int ElementsPerAccess = 128 / cutlass::sizeof_bits<half_t>::value;
-    using Operator = cutlass::arch::OpMultiplyAdd;
 };
 
 } // namespace kernel

@@ -16,15 +16,12 @@ import copy
 import json
 import math
 import struct
-import tarfile
 import weakref
 from functools import partial
 from pathlib import Path, PosixPath
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List
 
 import numpy as np
-import yaml
-from packaging import version
 
 # isort: off
 import torch
@@ -33,37 +30,35 @@ import tensorrt as trt
 
 # numpy doesn't know bfloat16, define abstract binary type instead
 np_bfloat16 = np.dtype('V2', metadata={"dtype": "bfloat16"})
-np_float8 = np.dtype('V1', metadata={"dtype": "float8"})
 
 
 def torch_to_numpy(x: torch.Tensor):
     assert isinstance(x, torch.Tensor), \
         f'x must be a torch.Tensor object, but got {type(x)}.'
-    if x.dtype == torch.bfloat16:
-        return x.view(torch.int16).detach().cpu().numpy().view(np_bfloat16)
-    elif x.dtype == torch.float8_e4m3fn:
-        return x.view(torch.int8).detach().cpu().numpy().view(np_float8)
-    else:
+    if x.dtype != torch.bfloat16:
         return x.detach().cpu().numpy()
+    return x.view(torch.int16).detach().cpu().numpy().view(np_bfloat16)
 
 
 def numpy_to_torch(x):
-    if x.dtype == np_bfloat16:
-        return torch.tensor(x.view(np.int16)).view(torch.bfloat16)
-    elif x.dtype == np_float8:
-        return torch.tensor(x.view(np.int8)).view(torch.float8_e4m3fn)
-    else:
+    if x.dtype != np_bfloat16:
         return torch.tensor(x)
+    return torch.tensor(x.view(np.int16)).view(torch.bfloat16)
 
 
 def numpy_to_dtype(x, dtype: str):
-    if str_dtype_to_np(dtype) == x.dtype:
-        return x
-    if x.dtype not in [np_bfloat16, np_float8
-                       ] and dtype not in ['bfloat16', 'fp8']:
-        return x.astype(str_dtype_to_np(dtype))
+    if x.dtype == np_bfloat16:
+        # BF16 --> non-BF16 or BF16
+        if dtype != 'bfloat16':
+            torch_to_numpy(numpy_to_torch(x).to(str_dtype_to_torch(dtype)))
+        else:
+            return x
     else:
-        return torch_to_numpy(numpy_to_torch(x).to(str_dtype_to_torch(dtype)))
+        # non-BF16 types --> non-BF16 or BF16
+        if dtype != 'bfloat16':
+            return x.astype(str_dtype_to_np(dtype))
+        else:
+            return torch_to_numpy(torch.from_numpy(x).to(torch.bfloat16))
 
 
 fp32_array = partial(np.array, dtype=np.float32)
@@ -78,27 +73,15 @@ def bf16_array(x):
 
 
 def copy_torch_to_numpy(x: torch.Tensor, ndarray: np.array):
-    if x.dtype == torch.bfloat16:
-        torch.from_numpy(ndarray.view(np.int16)).copy_(x.view(torch.int16))
-    elif x.dtype == torch.float8_e4m3fn:
-        torch.from_numpy(ndarray.view(np.int8)).copy_(x.view(torch.int8))
-    else:
+    if x.dtype != torch.bfloat16:
         torch.from_numpy(ndarray).copy_(x)
+        return ndarray
+    torch.from_numpy(ndarray.view(np.int16)).copy_(x.view(torch.int16))
     return ndarray
 
 
 def trt_version():
     return trt.__version__
-
-
-# TRT supports strongly_type in 9.1
-def support_strongly_type():
-    return version.parse(trt_version()) >= version.parse("9.1.0")
-
-
-# Preview change in TRT 10.0
-def preview_trt_version():
-    return version.parse(trt_version()).major > 9
 
 
 def torch_version():
@@ -113,7 +96,6 @@ _str_to_np_dict = dict(
     int8=np.int8,
     bool=np.bool_,
     bfloat16=np_bfloat16,
-    fp8=np_float8,
 )
 
 
@@ -131,7 +113,6 @@ _str_to_torch_dtype_dict = dict(
     int32=torch.int32,
     int8=torch.int8,
     bool=torch.bool,
-    fp8=torch.float8_e4m3fn,
 )
 
 
@@ -181,7 +162,6 @@ _np_to_trt_dtype_dict = {
     np.dtype('float32'): trt.float32,
     np.dtype('bool'): trt.bool,
     np_bfloat16: trt.bfloat16,
-    np_float8: trt.fp8,
 }
 
 
@@ -199,7 +179,6 @@ _trt_to_np_dtype_dict = {
     trt.float32: np.float32,
     trt.bool: np.bool_,
     trt.bfloat16: np_bfloat16,
-    trt.fp8: np_float8,
 }
 
 
@@ -218,7 +197,6 @@ _torch_to_np_dtype_dict = {
     torch.int64: np.int64,
     torch.float16: np.float16,
     torch.bfloat16: np_bfloat16,
-    torch.float8_e4m3fn: np_float8,
     torch.float32: np.float32,
     torch.float64: np.float64,
     torch.complex64: np.complex64,
@@ -239,8 +217,7 @@ _trt_to_torch_dtype_dict = {
     trt.int32: torch.int32,
     trt.int8: torch.int8,
     trt.bool: torch.bool,
-    trt.bfloat16: torch.bfloat16,
-    trt.fp8: torch.float8_e4m3fn,
+    trt.bfloat16: torch.bfloat16
 }
 
 
@@ -248,17 +225,6 @@ def trt_dtype_to_torch(dtype):
     ret = _trt_to_torch_dtype_dict.get(dtype)
     assert ret is not None, f'Unsupported dtype: {dtype}'
     return ret
-
-
-def is_same_dtype(type_a: Union[str, trt.DataType],
-                  type_b: Union[str, trt.DataType]) -> bool:
-    if isinstance(type_a, str):
-        type_a = str_dtype_to_trt(type_a)
-
-    if isinstance(type_b, str):
-        type_b = str_dtype_to_trt(type_b)
-
-    return type_a == type_b
 
 
 def dim_to_trt_axes(dim):
@@ -310,10 +276,6 @@ def mpi_world_size():
 
 def mpi_barrier():
     mpi_comm().Barrier()
-
-
-def mpi_broadcast(obj, root=0):
-    return mpi_comm().bcast(obj, root)
 
 
 def pad_vocab_size(vocab_size, tp_size):
@@ -391,19 +353,3 @@ def has_extra_attr(obj, attr_name):
     if id(obj) not in _extra_attrs_by_object:
         return False
     return attr_name in _extra_attrs_by_object[id(obj)]
-
-
-def unpack_nemo_weights(nemo_archive_path):
-    with tarfile.open(nemo_archive_path) as tar:
-        try:
-            model_weights = tar.extractfile("model_weights.ckpt")
-            model_config = tar.extractfile("model_config.yaml")
-        except KeyError:
-            try:
-                model_weights = tar.extractfile("./model_weights.ckpt")
-                model_config = tar.extractfile("./model_config.yaml")
-            except KeyError:
-                err_str = "Both model_weights paths not found in the tar archive."
-                raise Exception(err_str)
-        return yaml.safe_load(model_config), torch.load(
-            model_weights, map_location=torch.device("cpu"))

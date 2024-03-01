@@ -13,21 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .baichuan.model import BaichuanForCausalLM
-from .bert.model import (BertForQuestionAnswering,
-                         BertForSequenceClassification, BertModel)
+from .bert.model import BertForQuestionAnswering, BertModel
 from .bloom.model import BloomForCausalLM, BloomModel
-from .chatglm.model import ChatGLMForCausalLM, ChatGLMModel
+from .chatglm.model import ChatGLMHeadModel, ChatGLMModel
 from .enc_dec.model import DecoderModel, EncoderModel, WhisperEncoder
 from .falcon.model import FalconForCausalLM, FalconModel
-from .gemma.model import GemmaForCausalLM
 from .gpt.model import GPTLMHeadModel, GPTModel
 from .gptj.model import GPTJForCausalLM, GPTJModel
 from .gptneox.model import GPTNeoXForCausalLM, GPTNeoXModel
 from .llama.model import LLaMAForCausalLM, LLaMAModel
-from .mamba.model import MambaLMHeadModel
-from .medusa.model import MedusaForCausalLm
 from .modeling_utils import PretrainedConfig, PretrainedModel
-from .mpt.model import MPTForCausalLM, MPTModel
 from .opt.model import OPTForCausalLM, OPTModel
 from .phi.model import PhiForCausalLM, PhiModel
 from .qwen.model import QWenForCausalLM
@@ -37,7 +32,6 @@ from .quantized.quant import quantize_model  # noqa # isort:skip
 __all__ = [
     'BertModel',
     'BertForQuestionAnswering',
-    'BertForSequenceClassification',
     'BloomModel',
     'BloomForCausalLM',
     'FalconForCausalLM',
@@ -48,7 +42,6 @@ __all__ = [
     'OPTModel',
     'LLaMAForCausalLM',
     'LLaMAModel',
-    'MedusaForCausalLm',
     'GPTJModel',
     'GPTJForCausalLM',
     'GPTNeoXModel',
@@ -56,7 +49,7 @@ __all__ = [
     'PhiModel',
     'PhiForCausalLM',
     'quantize_model',
-    'ChatGLMForCausalLM',
+    'ChatGLMHeadModel',
     'ChatGLMModel',
     'BaichuanForCausalLM',
     'QWenForCausalLM',
@@ -65,29 +58,10 @@ __all__ = [
     'PretrainedConfig',
     'PretrainedModel',
     'WhisperEncoder',
-    'MambaLMHeadModel',
-    'MPTForCausalLM',
-    'MPTModel',
-    'SkyworkForCausalLM',
-    'GemmaForCausalLM',
 ]
 
 MODEL_MAP = {
     'OPTForCausalLM': OPTForCausalLM,
     'BloomForCausalLM': BloomForCausalLM,
     'FalconForCausalLM': FalconForCausalLM,
-    'PhiForCausalLM': PhiForCausalLM,
-    'MambaLMHeadModel': MambaLMHeadModel,
-    'GPTNeoXForCausalLM': GPTNeoXForCausalLM,
-    'GPTJForCausalLM': GPTJForCausalLM,
-    'MPTForCausalLM': MPTForCausalLM,
-    'ChatGLMForCausalLM': ChatGLMForCausalLM,
-    'LlamaForCausalLM': LLaMAForCausalLM,
-    'MistralForCausalLM': LLaMAForCausalLM,
-    'MixtralForCausalLM': LLaMAForCausalLM,
-    'InternLMForCausalLM': LLaMAForCausalLM,
-    'MedusaForCausalLM': MedusaForCausalLm,
-    'BaichuanForCausalLM': BaichuanForCausalLM,
-    'SkyworkForCausalLM': LLaMAForCausalLM,
-    'GemmaForCausalLM': GemmaForCausalLM,
 }

@@ -20,7 +20,7 @@ import tensorrt as trt
 from .._common import default_net, default_trtnet
 from .._utils import str_dtype_to_trt
 from ..functional import (Tensor, _add_plugin_info, _create_tensor, allgather,
-                          allreduce, cast, matmul)
+                          allreduce, cast, matmul, concat)
 from ..module import Module
 from ..parameter import Parameter
 from ..plugin import TRT_LLM_PLUGIN_NAMESPACE
@@ -68,22 +68,19 @@ class Linear(Module):
                  out_features,
                  bias=True,
                  dtype=None,
-                 use_fp8=False,
                  tp_group=None,
                  tp_size=1,
                  gather_output=True,
                  share_weight=None,
-                 strict_dtype=False,
-                 max_lora_rank=None):
+                 strict_dtype=False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features // tp_size
         self.dtype = dtype
-        self.use_fp8 = use_fp8
 
         if not share_weight:
             self.weight = Parameter(shape=(self.out_features, self.in_features),
-                                    dtype=('fp8' if use_fp8 else dtype))
+                                    dtype=dtype)
         else:
             self.weight = share_weight
 
@@ -97,25 +94,26 @@ class Linear(Module):
         else:
             self.register_parameter('bias', None)
 
-        if max_lora_rank is None:
-            max_lora_rank = min(self.in_features, self.out_features)
         self.lora = Lora(
             in_hidden_size=self.in_features,
             out_hidden_sizes=[self.out_features],
-            max_low_rank=max_lora_rank,
+            max_low_rank=min(
+                self.in_features, self.out_features
+            ),  # Assume low rank is smaller than in/out features
         )
 
     def multiply_gather(self,
                         x,
                         weight,
                         gemm_plugin,
+                        use_fp8=False,
                         lora_runtime_params: LoraRuntimeParams = None):
         hidden_state = x
         if gemm_plugin:
             x = _gemm_plugin(x,
                              weight,
                              transb=True,
-                             use_fp8=self.use_fp8,
+                             use_fp8=use_fp8,
                              strict_dtype=self.strict_dtype)
         else:
             x = matmul(x, weight, transb=True)
@@ -131,7 +129,8 @@ class Linear(Module):
 
         if self.gather_output and self.tp_size > 1 and self.tp_group is not None:
             # [dim0, local_dim] -> [dim0 * tp_size, local_dim] --> [dim0, local_dim * tp_size]
-            x = allgather(x, self.tp_group, gather_dim=-1)
+            # x = allgather(x, self.tp_group, gather_dim=-1)
+            x = concat([x, x], 1)
 
         return x
 
@@ -152,19 +151,17 @@ class RowLinear(Module):
                  out_features,
                  bias=True,
                  dtype=None,
-                 use_fp8=False,
                  tp_group=None,
                  tp_size=1,
-                 strict_dtype: bool = False,
-                 max_lora_rank=None):
+                 instance_id: int = 0,
+                 strict_dtype: bool = False):
         super().__init__()
         self.in_features = in_features // tp_size
         self.out_features = out_features
         self.dtype = dtype
-        self.use_fp8 = use_fp8
 
         self.weight = Parameter(shape=(self.out_features, self.in_features),
-                                dtype=('fp8' if use_fp8 else dtype))
+                                dtype=dtype)
 
         if bias:
             self.bias = Parameter(shape=(self.out_features, ), dtype=dtype)
@@ -173,13 +170,14 @@ class RowLinear(Module):
 
         self.tp_group = tp_group
         self.tp_size = tp_size
+        self.instance_id = instance_id
 
-        if max_lora_rank is None:
-            max_lora_rank = min(self.in_features, self.out_features)
         self.lora = Lora(
             in_hidden_size=self.in_features,
             out_hidden_sizes=[self.out_features],
-            max_low_rank=max_lora_rank,
+            max_low_rank=min(
+                self.in_features, self.out_features
+            ),  # Assume low rank is smaller than in/out features
         )
         self.strict_dtype = self.dtype if strict_dtype else None
 
@@ -188,13 +186,14 @@ class RowLinear(Module):
                         weight,
                         gemm_plugin,
                         use_fp8=False,
+                        workspace=None,
                         lora_runtime_params: LoraRuntimeParams = None):
         hidden_state = x
         if gemm_plugin:
             x = _gemm_plugin(x,
                              weight,
                              transb=True,
-                             use_fp8=self.use_fp8,
+                             use_fp8=use_fp8,
                              strict_dtype=self.strict_dtype)
         else:
             x = matmul(x, weight, transb=True)
@@ -205,7 +204,8 @@ class RowLinear(Module):
                               lora_runtime_params=lora_runtime_params)
 
         if self.tp_size > 1 and self.tp_group is not None:
-            x = allreduce(x, self.tp_group)
+            pass
+        #     x = allreduce(x, self.tp_group, workspace, self.instance_id)
 
         if self.bias is not None:
             bias = cast(self.bias.value, x.dtype)
@@ -213,8 +213,12 @@ class RowLinear(Module):
 
         return x
 
-    def forward(self, x, lora_runtime_params: LoraRuntimeParams = None):
+    def forward(self,
+                x,
+                workspace=None,
+                lora_runtime_params: LoraRuntimeParams = None):
         return self.multiply_reduce(x,
                                     self.weight.value,
                                     default_net().plugin_config.gemm_plugin,
+                                    workspace=workspace,
                                     lora_runtime_params=lora_runtime_params)

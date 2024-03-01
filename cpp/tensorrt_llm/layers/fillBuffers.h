@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,6 @@
 
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/memoryUtils.h"
-#include "tensorrt_llm/kernels/decodingCommon.h"
 
 namespace tensorrt_llm
 {
@@ -39,40 +38,28 @@ struct FillBuffers
 
     template <typename T>
     void operator()(std::optional<std::vector<T>> const& optParam, T const defaultValue, std::vector<T>& hostBuffer,
-        T* deviceBuffer, int32_t const* batchSlots) const
+        T*& deviceBuffer) const
     {
         using tensorrt_llm::common::cudaAutoCpy;
 
-        for (size_t bi = 0; bi < batchSize; ++bi)
+        hostBuffer.resize(batch_size);
+        if (!optParam)
         {
-            auto const batchSlot = batchSlots ? batchSlots[bi] : bi;
-            if (!optParam)
-            {
-                hostBuffer[batchSlot] = defaultValue;
-            }
-            else if (optParam->size() == 1)
-            {
-                hostBuffer[batchSlot] = optParam->front();
-            }
-            else
-            {
-                TLLM_CHECK_WITH_INFO(optParam->size() == batchSize, "Argument vector size mismatch.");
-                hostBuffer[batchSlot] = optParam.value()[bi];
-            }
+            std::fill(std::begin(hostBuffer), std::end(hostBuffer), defaultValue);
         }
-
-        if (batchSlots)
+        else if (optParam->size() == 1)
         {
-            cudaAutoCpy(deviceBuffer, hostBuffer.data(), maxBatchSize, stream);
+            std::fill(std::begin(hostBuffer), std::end(hostBuffer), optParam->front());
         }
         else
         {
-            cudaAutoCpy(deviceBuffer, hostBuffer.data(), batchSize, stream);
+            TLLM_CHECK_WITH_INFO(optParam->size() == batch_size, "Argument vector size mismatch.");
+            std::copy(optParam->begin(), optParam->end(), std::begin(hostBuffer));
         }
+        cudaAutoCpy(deviceBuffer, hostBuffer.data(), batch_size, stream);
     }
 
-    size_t batchSize;
-    size_t maxBatchSize;
+    size_t batch_size;
     cudaStream_t stream;
 };
 

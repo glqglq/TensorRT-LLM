@@ -29,7 +29,7 @@ project(tensorrt_llm LANGUAGES CXX)
 # Build options
 option(BUILD_PYT "Build in PyTorch TorchScript class mode" ON)
 option(BUILD_PYBIND "Build Python bindings for C++ runtime and batch manager"
-       ON)
+       OFF)
 option(BUILD_TESTS "Build Google tests" ON)
 option(BUILD_BENCHMARKS "Build benchmarks" ON)
 option(NVTX_DISABLE "Disable all NVTX features" ON)
@@ -58,20 +58,6 @@ if(BUILD_BATCH_MANAGER)
   message(STATUS "Building batch manager")
 else()
   message(STATUS "Importing batch manager")
-endif()
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tensorrt_llm/executor/CMakeLists.txt")
-  set(BUILD_EXECUTOR_DEFAULT ON)
-else()
-  set(BUILD_EXECUTOR_DEFAULT OFF)
-endif()
-
-option(BUILD_EXECUTOR "Build executor from source" ${BUILD_EXECUTOR_DEFAULT})
-
-if(BUILD_EXECUTOR)
-  message(STATUS "Building executor")
-else()
-  message(STATUS "Importing executor")
 endif()
 
 if(BUILD_PYT)
@@ -166,10 +152,19 @@ find_library(
   CUDNN_LIB cudnn
   HINTS ${CUDNN_ROOT_DIR} ${CUDAToolkit_LIBRARY_DIR}
   PATH_SUFFIXES lib64 lib lib/x64)
-set(CUBLAS_LIB CUDA::cublas)
-set(CUBLASLT_LIB CUDA::cublasLt)
-set(CUDA_DRV_LIB CUDA::cuda_driver)
-set(CUDA_RT_LIB CUDA::cudart_static)
+find_library(
+  CUBLAS_LIB cublas
+  HINTS ${CUDAToolkit_LIBRARY_DIR}
+  PATH_SUFFIXES lib64 lib lib/stubs)
+find_library(
+  CUBLASLT_LIB cublasLt
+  HINTS ${CUDAToolkit_LIBRARY_DIR}
+  PATH_SUFFIXES lib64 lib lib/stubs)
+find_library(
+  CUDA_DRV_LIB cuda
+  HINTS ${CUDAToolkit_LIBRARY_DIR}
+  PATH_SUFFIXES stubs lib lib64 lib/stubs lib64/stubs)
+
 set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 
 find_library(RT_LIB rt)
@@ -182,16 +177,12 @@ if(ENABLE_MULTI_DEVICE EQUAL 1)
   find_library(NCCL_LIB nccl HINTS ${NCCL_LIB_DIR})
 endif()
 
-get_filename_component(TRT_LLM_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR} PATH)
+get_filename_component(TRT_LLM_ROOT_DIR ${CMAKE_SOURCE_DIR} PATH)
 
 set(3RDPARTY_DIR ${TRT_LLM_ROOT_DIR}/3rdparty)
 include_directories(
-  ${CUDAToolkit_INCLUDE_DIRS}
-  ${CUDNN_ROOT_DIR}/include
-  ${NCCL_INCLUDE_DIR}
-  ${3RDPARTY_DIR}/cutlass/include
-  ${3RDPARTY_DIR}/cutlass/tools/util/include
-  ${3RDPARTY_DIR}/NVTX/include
+  ${CUDAToolkit_INCLUDE_DIRS} ${CUDNN_ROOT_DIR}/include ${NCCL_INCLUDE_DIR}
+  ${3RDPARTY_DIR}/cutlass/include ${3RDPARTY_DIR}/NVTX/include
   ${3RDPARTY_DIR}/json/include)
 
 # TRT dependencies
@@ -246,7 +237,7 @@ if(WIN32)
   set(CMAKE_CXX_FLAGS "/DNOMINMAX ${CMAKE_CXX_FLAGS}")
 endif()
 
-if((WIN32))
+if((MSVC))
   if((MSVC_VERSION GREATER_EQUAL 1914))
     # MSVC does not apply the correct __cplusplus version per the C++ standard
     # by default. This is required for compiling CUTLASS 3.0 kernels on windows

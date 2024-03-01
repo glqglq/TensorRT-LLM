@@ -1,4 +1,7 @@
 __pycache__/
+3rdparty/
+bin/
+cpp/build/
 .vscode
 *.engine
 *.engine.config
@@ -19,6 +22,8 @@ venv/
 .idea/
 cpp/cmake-build-*
 cpp/.ccache/
+cpp/tensorrt_llm/kernels/contextFusedMultiHeadAttention/
+cpp/tensorrt_llm/kernels/decoderMaskedMultiheadAttention/
 tensorrt_llm/libs
 tensorrt_llm/bindings.pyi
 tensorrt_llm/bindings/*.pyi

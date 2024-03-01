@@ -24,44 +24,40 @@ namespace kernels
 {
 //! \brief Sets finished state to FinishedState::FINISHED_STOP_WORDS if any of the stopWords is met.
 //!
-//! \param outputIds input buffer [maxBatchSize][maxSeqLen]. Contains pointers to rows with output tokens per request
-//! \param parentIds input buffer [maxBatchSize][maxSeqLen]. Contains pointers to rows with parent ids. Applicable when
+//! \param outputIds input buffer [batchSize][maxSeqLen]. Contains pointers to rows with output tokens per request
+//! \param parentIds input buffer [batchSize][maxSeqLen]. Contains pointers to rows with parent ids. Applicable when
 //! beamWidth > 1
-//! \param stopWords input buffer [maxBatchSize][2, stopWordsLen]. For each instance in batch the first row
+//! \param stopWords input buffer [batchSize, 2, stopWordsLen]. For each instance in batch the first row
 //! is the token ids of the stop words. The second row is the exclusive prefix sum of the word lengths.
 //! In case all the words are made of a single token,
 //! the inner-most dimension of the tensor must be increased by 1.
-//! \param finished input/output buffer [maxBatchSize, beamWidth].
+//! \param finished input/output buffer [batchSize, beamWidth].
 //! Finished states. Set to FinishedState::FINISHED_STOP_WORDS if any
 //! sequence of the stop words is met
-//! \param sequenceLengths input buffer [maxBatchSize, beamWidth]. Current sequence
+//! \param sequenceLengths input buffer [batchSize, beamWidth]. Current sequence
 //! lengths of the request tokens.
-//! \param batchSlots input buffer[batchSize], optional. Indices of rows of data in memory pool
-//! \param stopWordsLen input buffer [maxBatchSize], cumulative length of all stop words per request
-//! \param maxStopWordsLen maximum stopWordsLen over all requests in the batch
+//! \param stopWordsLen cumulative length of all stop words
 //! \param batchSize batch size
 //! \param beamWidth beam width
 //! \param maxSeqLen maximum length of the sequence
 //! \param stream stream
-void invokeStopWordsCriterion(int32_t const** outputIds, int32_t const** parentIds, int32_t const** stopWords,
-    FinishedState* finished, int32_t const* sequenceLengths, int32_t const* batchSlots, int32_t const* stopWordsLen,
-    int32_t maxStopWordsLen, int32_t batchSize, int32_t beamWidth, int32_t maxSeqLen, cudaStream_t stream);
+void invokeStopWordsCriterion(const int** outputIds, const int** parentIds, const int* stopWords,
+    FinishedState* finished, const int* sequenceLengths, size_t stopWordsLen, int batchSize, int beamWidth,
+    int maxSeqLen, cudaStream_t stream);
 
 //! \brief Sets finished states based on the sequenceLimitLength and computes number of finished sequences in the batch.
 //!
-//! \param finished input/output buffer [maxBatchSize, beamWidth]. Finished states. Set to
+//! \param finished input/output buffer [batchSize, beamWidth]. Finished states. Set to
 //! FinishedState::FINISHED_MAX_LENGTH if sequenceLengths >= sequenceLimitLength
 //! \param finishedSum output buffer [1].
 //! Total sum of finished requests
-//! \param sequenceLimitLength input buffer [maxBatchSize]. Maximum sequence length.
-//! \param sequenceLengths input buffer [maxBatchSize, beamWidth].
+//! \param sequenceLimitLength input buffer [batchSize]. Maximum sequence length.
+//! \param sequenceLengths input buffer [batchSize, beamWidth].
 //! Current sequence lengths of the request tokens.
-//! \param batchSlots input buffer[batchSize], optional. Indices of rows of data in memory pool
 //! \param batchSize batch size
 //! \param beamWidth beam width
 //! \param stream stream
-void invokeLengthCriterion(FinishedState* finished, int32_t* finishedSum, uint32_t const* sequenceLimitLength,
-    int32_t const* sequenceLengths, int32_t const* batchSlots, int32_t batchSize, int32_t beamWidth,
-    cudaStream_t stream);
+void invokeLengthCriterion(FinishedState* finished, int* finishedSum, const uint32_t* sequenceLimitLength,
+    const int* sequenceLengths, int batchSize, int beamWidth, cudaStream_t stream);
 } // namespace kernels
 } // namespace tensorrt_llm

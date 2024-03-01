@@ -133,32 +133,9 @@ struct ConvertMMHAToXQAParamsHelper<__half, KVLinearBuffer>
     static constexpr bool supported = true;
 };
 
-template <>
-struct ConvertMMHAToXQAParamsHelper<__half, KVBlockArray>
-{
-    static constexpr Data_type data_type = DATA_TYPE_FP16;
-    static constexpr bool supported = true;
-};
-
-#ifdef ENABLE_BF16
-template <>
-struct ConvertMMHAToXQAParamsHelper<__nv_bfloat16, KVLinearBuffer>
-{
-    static constexpr Data_type data_type = DATA_TYPE_BF16;
-    static constexpr bool supported = true;
-};
-
-template <>
-struct ConvertMMHAToXQAParamsHelper<__nv_bfloat16, KVBlockArray>
-{
-    static constexpr Data_type data_type = DATA_TYPE_BF16;
-    static constexpr bool supported = true;
-};
-#endif
-
 template <typename T, typename KVCacheBuffer>
-bool GPTAttentionPluginCommon::convertMMHAParamsToXQAParams(tensorrt_llm::kernels::XQAParams& xqaParams,
-    const EnqueueGenerationParams<T, KVCacheBuffer>& generationsParams, bool forConfigurePlugin)
+bool GPTAttentionPluginCommon::convertMMHAParamsToXQAParams(
+    tensorrt_llm::kernels::XQAParams& xqaParams, const EnqueueGenerationParams<T, KVCacheBuffer>& generationsParams)
 {
     bool retval = ConvertMMHAToXQAParamsHelper<T, KVCacheBuffer>::supported;
     if (!retval)
@@ -166,9 +143,8 @@ bool GPTAttentionPluginCommon::convertMMHAParamsToXQAParams(tensorrt_llm::kernel
         return false;
     }
     memset(&xqaParams, 0, sizeof(XQAParams));
-    xqaParams.data_type = ConvertMMHAToXQAParamsHelper<T, KVCacheBuffer>::data_type;
+    xqaParams.data_type = ConvertMMHAToXQAParamsHelper<T, KvCacheDataType>::data_type;
 
-    xqaParams.layer_idx = mLayerIdx;
     xqaParams.num_q_heads = mNumHeads;
     xqaParams.num_kv_heads = mNumKVHeads;
     xqaParams.head_size = mHeadSize;
@@ -192,8 +168,6 @@ bool GPTAttentionPluginCommon::convertMMHAParamsToXQAParams(tensorrt_llm::kernel
     xqaParams.cross_attention = mCrossAttention;
     xqaParams.max_distance = mMaxDistance;
     xqaParams.multi_block_mode = mMultiBlockMode;
-    // Medusa mode will have multiple query tokens.
-    xqaParams.multi_query_tokens = mIsMedusaEnabled;
 
     if (mKVCacheQuantMode.hasInt8KvCache())
     {
@@ -205,7 +179,7 @@ bool GPTAttentionPluginCommon::convertMMHAParamsToXQAParams(tensorrt_llm::kernel
     }
     else
     {
-        xqaParams.kv_cache_data_type = xqaParams.data_type;
+        xqaParams.kv_cache_data_type = DATA_TYPE_FP16;
     }
 
     xqaParams.output = generationsParams.context_buf;
@@ -218,25 +192,14 @@ bool GPTAttentionPluginCommon::convertMMHAParamsToXQAParams(tensorrt_llm::kernel
     xqaParams.workspaces = generationsParams.workspace;
     xqaParams.batch_size = generationsParams.num_requests;
     xqaParams.beam_width = generationsParams.beam_width;
-    // Medusa mode has generation input_length > 1.
-    xqaParams.generation_input_length = generationsParams.input_seq_length;
     xqaParams.max_attention_window_size = generationsParams.max_attention_window;
     xqaParams.cyclic_attention_window_size = generationsParams.cyclic_attention_window_size;
-    xqaParams.max_blocks_per_sequence = generationsParams.max_blocks_per_sequence;
     xqaParams.sink_token_length = generationsParams.sink_token_length;
     xqaParams.timestep = generationsParams.past_kv_length;
     xqaParams.qkv_bias = generationsParams.qkv_bias;
     xqaParams.sequence_lengths = generationsParams.sequence_lengths;
     xqaParams.context_lengths = generationsParams.context_lengths;
     xqaParams.alibi_slopes = generationsParams.alibi_slopes;
-    if (!forConfigurePlugin)
-    {
-        // Medusa (need to take new generated ids into consideration).
-        TLLM_CHECK_WITH_INFO(!mIsMedusaEnabled || generationsParams.medusa_packed_mask != nullptr,
-            "Medusa mode needs a valid packed_mask input tensor.");
-    }
-    xqaParams.medusa_packed_mask = generationsParams.medusa_packed_mask;
-    xqaParams.medusa_position_offsets = generationsParams.medusa_position_offsets;
     return true;
 }
 
@@ -364,19 +327,18 @@ INSTANTIATE_MMHA_DISPATCH(__nv_bfloat16, __nv_bfloat16)
 #endif
 #undef INSTANTIATE_MMHA_DISPATCH
 
-GPTAttentionPluginCommon::GPTAttentionPluginCommon(int layer_idx, int num_heads, int num_kv_heads, int head_size,
-    int unidirectional, float q_scaling, tensorrt_llm::kernels::PositionEmbeddingType position_embedding_type,
+GPTAttentionPluginCommon::GPTAttentionPluginCommon(int num_heads, int num_kv_heads, int head_size, int unidirectional,
+    float q_scaling, tensorrt_llm::kernels::PositionEmbeddingType position_embedding_type,
     int rotary_embedding_dim, // for RoPE. Use 0 for non-RoPE
     float rotary_embedding_base, tensorrt_llm::kernels::RotaryScalingType rotary_embedding_scale_type,
     float rotary_embedding_scale, int rotary_embedding_max_positions, int tp_size, int tp_rank, // for ALiBi
     bool unfuse_qkv_gemm,                                                                       // for AutoPP
-    tensorrt_llm::kernels::ContextFMHAType context_fmha_type, bool multi_block_mode, bool enable_xqa,
-    int kv_cache_quant_mode, bool remove_input_padding, tensorrt_llm::kernels::AttentionMaskType mask_type,
-    bool paged_kv_cache, int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length,
-    bool qkv_bias_enabled, bool cross_attention, int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
-    bool use_paged_context_fmha, bool use_cache, bool is_medusa_enabled)
-    : mLayerIdx(layer_idx)
-    , mNumHeads(num_heads)
+    tensorrt_llm::kernels::ContextFMHAType context_fmha_type, bool multi_block_mode, int kv_cache_quant_mode,
+    bool remove_input_padding, tensorrt_llm::kernels::AttentionMaskType mask_type, bool paged_kv_cache,
+    int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length, bool qkv_bias_enabled,
+    bool cross_attention, int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
+    bool use_paged_context_fmha, bool use_cache)
+    : mNumHeads(num_heads)
     , mNumKVHeads(num_kv_heads)
     , mHeadSize(head_size)
     , mUnidirectional(unidirectional)
@@ -393,7 +355,6 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(int layer_idx, int num_heads,
     , mMaskType(mask_type)
     , mType(type)
     , mMultiBlockMode(multi_block_mode)
-    , mEnableXQA(enable_xqa)
     , mKVCacheQuantMode(kv_cache_quant_mode)
     , mRemovePadding(remove_input_padding)
     , mPagedKVCache(paged_kv_cache)
@@ -409,59 +370,16 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(int layer_idx, int num_heads,
     , mDenseContextFMHA(dense_context_fmha)
     , mPagedContextFMHA(use_paged_context_fmha)
     , mUseKVCache(use_cache)
-    , mIsMedusaEnabled(is_medusa_enabled)
 {
-    // Pre-check whether FMHA is supported in order to save memory allocation.
-    if (mEnableContextFMHA)
-    {
-        mEnableContextFMHA = false;
-        if (!(mType == nvinfer1::DataType::kHALF || mType == nvinfer1::DataType::kBF16))
-        {
-            TLLM_LOG_WARNING("Fall back to unfused MHA because of unsupported data type.");
-        }
-        else if (!MHARunner::fmha_supported(getHeadSize(), mSM))
-        {
-            TLLM_LOG_WARNING(
-                "Fall back to unfused MHA because of unsupported head size %d in sm_%d.", getHeadSize(), mSM);
-        }
-        else if (mCrossAttention)
-        {
-            TLLM_LOG_WARNING("Fall back to unfused MHA because of cross attention.");
-        }
-        else if (mPositionEmbeddingType == tensorrt_llm::kernels::PositionEmbeddingType::kRELATIVE)
-        {
-            TLLM_LOG_WARNING("Fall back to unfused MHA because of relative position embedding.");
-        }
-        else if (mSM == 70 && isALiBi())
-        {
-            TLLM_LOG_WARNING("Alibi is not supported for FMHA on Volta.");
-        }
-        else
-        {
-            mEnableContextFMHA = true;
-        }
-    }
+    // pre-check whether FMHA is supported in order to save memory allocation
+    mEnableContextFMHA = mEnableContextFMHA
+        && (mType == nvinfer1::DataType::kHALF || mType == nvinfer1::DataType::kBF16)
+        && MHARunner::fmha_supported(getHeadSize(), mSM) && !mCrossAttention
+        && mPositionEmbeddingType != tensorrt_llm::kernels::PositionEmbeddingType::kRELATIVE;
 
     TLLM_CHECK(isRoPE() == (rotary_embedding_dim != 0));
     TLLM_CHECK_WITH_INFO((mSM >= 80) || (mType != nvinfer1::DataType::kBF16),
         "Unsupported data type, pre SM 80 GPUs do not support bfloat16");
-
-    // Some features have not been implemented on Volta.
-    if (mSM == 70 && mEnableContextFMHA)
-    {
-        // Volta only has disablePagedKVContextFMHA implement
-        TLLM_CHECK_WITH_INFO(!(mPagedKVCache && mPagedContextFMHA), "PagedKV Context FMHA is not supported on Volta");
-        // Volta dose not support FP32 acc
-        TLLM_CHECK_WITH_INFO(!mFMHAForceFP32Acc, "FP32 Acc is not supported on Volta");
-
-        TLLM_LOG_WARNING("Note that alibi or sliding window attention are not supported for FMHA on Volta");
-    }
-
-    // Pre-check whether the head size is supported by MMHA.
-    if (!mmha_supported(getHeadSize()))
-    {
-        TLLM_CHECK_WITH_INFO(false, "Head size %d is not supported by MMHA.", getHeadSize());
-    }
 }
 
 const int GPTAttentionPluginCommon::getHeadSize(bool checkInit) const
@@ -479,7 +397,6 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(const void* data, size_t leng
     const char *d = reinterpret_cast<const char*>(data), *a = d;
     unsigned int kvCacheQuantMode;
 
-    read(d, mLayerIdx);
     read(d, mNumHeads);
     read(d, mNumKVHeads);
     read(d, mHeadSize);
@@ -497,7 +414,6 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(const void* data, size_t leng
     read(d, mEnableContextFMHA);
     read(d, mFMHAForceFP32Acc);
     read(d, mMultiBlockMode);
-    read(d, mEnableXQA);
     read(d, kvCacheQuantMode);
     read(d, mRemovePadding);
     read(d, mMaskType);
@@ -512,26 +428,19 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(const void* data, size_t leng
     read(d, mDenseContextFMHA);
     read(d, mPagedContextFMHA);
     read(d, mUseKVCache);
-    read(d, mIsMedusaEnabled);
 
     mKVCacheQuantMode = tc::QuantMode(kvCacheQuantMode);
 
-    TLLM_CHECK_WITH_INFO(d == a + length,
-        "Expected length (%d) != real length (%d). This is often "
-        "caused by using different TensorRT-LLM version to build "
-        "engine and run engine.",
-        (int) length, (int) (d - a));
+    TLLM_CHECK(d == a + length);
     TLLM_CHECK_WITH_INFO((mSM >= 80) || (mType != nvinfer1::DataType::kBF16),
         "Unsupported data type, pre SM 80 GPUs do not support bfloat16");
 }
 
 size_t GPTAttentionPluginCommon::getWorkspaceSizeForContext(nvinfer1::DataType type, int32_t nbReq,
-    int32_t input_seq_length, int32_t max_attention_window, int32_t cross_qkv_length,
-    int32_t max_num_tokens) const noexcept
+    int32_t input_seq_length, int32_t max_attention_window, int32_t cross_qkv_length) const noexcept
 {
     const int local_hidden_units_qo = mNumHeads * getHeadSize();
     const int local_hidden_units_kv = mNumKVHeads * getHeadSize();
-    const bool chunked_context_support = mEnableContextFMHA && mPagedKVCache && mPagedContextFMHA;
 
     auto const size = tensorrt_llm::runtime::BufferDataType(type).getSize();
 
@@ -542,9 +451,9 @@ size_t GPTAttentionPluginCommon::getWorkspaceSizeForContext(nvinfer1::DataType t
         ? 0
         : size * batch_size * input_seq_length * (isCrossAttention() ? cross_qkv_length : input_seq_length);
     const size_t cu_seqlens_size = sizeof(int) * (batch_size + 1);
-    const size_t q_buf_2_size = chunked_context_support
-        ? size * max_num_tokens * local_hidden_units_qo
-        : (!mEnableContextFMHA ? size * batch_size * input_seq_length * local_hidden_units_qo : 0);
+    const size_t q_buf_2_size = (mEnableContextFMHA && mPagedKVCache && mPagedContextFMHA) || !mEnableContextFMHA
+        ? size * batch_size * input_seq_length * local_hidden_units_qo
+        : 0;
     const size_t k_buf_2_size = mEnableContextFMHA
         ? 0
         : size * batch_size * (isCrossAttention() ? cross_qkv_length : input_seq_length) * local_hidden_units_kv;
@@ -618,7 +527,7 @@ size_t GPTAttentionPluginCommon::getWorkspaceSizeForGeneration(
     if (mDecoderXQARunner.get())
     {
         size_t mqa_workspaces[1];
-        mqa_workspaces[0] = mDecoderXQARunner->getWorkspaceSize(batch_beam);
+        mqa_workspaces[0] = mDecoderXQARunner->getWorkspaceSize();
         mqa_workspace_size = tc::calculateTotalWorkspaceSize(mqa_workspaces, 1);
     }
 
@@ -727,8 +636,10 @@ int GPTAttentionPluginCommon::enqueueContext(const EnqueueContextParams<T, KVCac
             * params.input_seq_length * (isCrossAttention() ? params.cross_qkv_length : params.input_seq_length);
     const size_t padding_offset_size
         = sizeof(int) * params.batch_size * (isCrossAttention() ? params.cross_qkv_length : params.input_seq_length);
+    // It is assumed that the number of tokens per paged kv block should be >= 128.
+    const size_t blocks_per_context_sequence = mPagedKVCache ? tc::divUp(params.input_seq_length, mTokensPerBlock) : 0;
     const size_t paged_kv_tma_desc_size = mPagedKVCache && mPagedContextFMHA
-        ? params.batch_size * 2 * TMA_DESC_SIZE_IN_BYTE * params.max_blocks_per_sequence
+        ? params.batch_size * 2 * TMA_DESC_SIZE_IN_BYTE * blocks_per_context_sequence
         : 0;
 
     const bool is_qk_buf_float_ = true;
@@ -828,11 +739,11 @@ int GPTAttentionPluginCommon::enqueueContext(const EnqueueContextParams<T, KVCac
             mRemovePadding ? padding_offset : nullptr, params.batch_size, params.input_seq_length,
             params.cyclic_attention_window_size, params.sink_token_length, params.num_tokens, mNumHeads, mNumKVHeads,
             getHeadSize(), mRotaryEmbeddingDim, mRotaryEmbeddingBase, mRotaryEmbeddingScaleType, mRotaryEmbeddingScale,
-            mRotaryEmbeddingMaxPositions, position_embedding_type, (int*) nullptr, mPosShiftEnabled, (float*) nullptr,
-            0, cache_type, params.kv_scale_orig_quant, enablePagedKVContextFMHA, 1, mLaunchGridBlockCache, stream);
+            mRotaryEmbeddingMaxPositions, position_embedding_type, mPosShiftEnabled, (float*) nullptr, 0, cache_type,
+            params.kv_scale_orig_quant, enablePagedKVContextFMHA, 1, mLaunchGridBlockCache, stream);
         sync_check_cuda_error();
 
-        // It is not needed with packed QKV input.
+        //  It is not needed with packed QKV input.
         if (enablePagedKVContextFMHA)
         {
             // to enable chunked attention,
@@ -853,7 +764,7 @@ int GPTAttentionPluginCommon::enqueueContext(const EnqueueContextParams<T, KVCac
                 TLLM_LOG_ERROR("Cannot support StreamingLLM now when enabling paged KV context FMHA.");
             }
             mFMHARunner->setup_paged_kv(params.batch_size, params.input_seq_length, params.max_past_kv_len,
-                params.max_blocks_per_sequence, mTokensPerBlock, params.cyclic_attention_window_size, params.num_tokens,
+                blocks_per_context_sequence, mTokensPerBlock, params.cyclic_attention_window_size, params.num_tokens,
                 isALiBi(), isAliBiWithScale(), mTpSize, mTpRank);
             mFMHARunner->run_paged_kv(q_buf_2_, paged_kv_tma_desc, host_kv_cache_block_ptrs,
                 reinterpret_cast<KVBlockArray&>(kv_cache_buffer), cu_q_seqlens, cu_kv_seqlens, params.context_buf,
@@ -1010,7 +921,7 @@ int GPTAttentionPluginCommon::enqueueContext(const EnqueueContextParams<T, KVCac
                 invokeAddRelativeAttentionBiasUnaligned(qk_buf_float_, relative_attention_bias, params.batch_size,
                     mNumHeads, attention_seq_len_1,
                     isCrossAttention() ? params.cross_qkv_length : params.cyclic_attention_window_size, stream,
-                    max_distance > 0, relative_attention_bias_stride, max_distance, false /* bidirectional */);
+                    max_distance > 0, relative_attention_bias_stride, max_distance, true /* bidirectional */);
             }
 
             MaskedSoftmaxParam<T, float> param;
@@ -1038,7 +949,7 @@ int GPTAttentionPluginCommon::enqueueContext(const EnqueueContextParams<T, KVCac
                 invokeAddRelativeAttentionBiasUnaligned(qk_buf_, relative_attention_bias, params.batch_size, mNumHeads,
                     attention_seq_len_1,
                     isCrossAttention() ? params.cross_qkv_length : params.cyclic_attention_window_size, stream,
-                    max_distance > 0, relative_attention_bias_stride, max_distance, false /* bidirectional */);
+                    max_distance > 0, relative_attention_bias_stride, max_distance, true /* bidirectional */);
             }
 
             MaskedSoftmaxParam<T, T> param;
@@ -1206,22 +1117,16 @@ int GPTAttentionPluginCommon::enqueueGeneration(
     sync_check_cuda_error();
 
     // Try XQA optimization first.
+    if (!mCrossAttention)
     {
-        // NOTE: input_seq_length = num_medusa_tokens + 1 (new generated one from the original LM head)
         // self attn
         XQAParams xqaParams{};
         if (tensorrt_llm::kernels::XQADispatchHelper<T, KVCacheBuffer>::CanSupport && mDecoderXQARunner.get() != nullptr
-            && this->template convertMMHAParamsToXQAParams<T, KVCacheBuffer>(
-                xqaParams, params, /*forConfigurePlugin=*/false)
-            && mDecoderXQARunner->template shouldUse<T>(xqaParams, /*forConfigurePlugin=*/false))
+            && this->template convertMMHAParamsToXQAParams<T, KVCacheBuffer>(xqaParams, params)
+            && mDecoderXQARunner->template shouldUse<T>(xqaParams))
         {
-            TLLM_LOG_DEBUG("XQA kernels are selected in the generation phase.");
             mDecoderXQARunner->template dispatch<KVCacheBuffer>(xqaParams, kv_cache_buffer, stream);
             return 0;
-        }
-        else if (mIsMedusaEnabled)
-        {
-            TLLM_CHECK_WITH_INFO(false, "No available XQA kernels are found for medusa mode.");
         }
     }
 
@@ -1382,41 +1287,6 @@ template int GPTAttentionPluginCommon::enqueueGeneration<__nv_bfloat16, KVBlockA
     const EnqueueGenerationParams<__nv_bfloat16, KVBlockArray>& params, cudaStream_t stream);
 #endif
 
-template <typename T, typename KVCacheBuffer>
-void GPTAttentionPluginCommon::prepareEnqueueGeneration(const EnqueueGenerationParams<T, KVCacheBuffer>& params)
-{
-    // self attn
-    XQAParams xqaParams{};
-    if (tensorrt_llm::kernels::XQADispatchHelper<T, KVCacheBuffer>::CanSupport && mDecoderXQARunner.get() != nullptr
-        && this->template convertMMHAParamsToXQAParams<T, KVCacheBuffer>(xqaParams, params, /*forConfigurePlugin=*/true)
-        && mDecoderXQARunner->template shouldUse<T>(xqaParams, /*forConfigurePlugin=*/true))
-    {
-        mDecoderXQARunner->prepare(xqaParams);
-    }
-}
-
-template void GPTAttentionPluginCommon::prepareEnqueueGeneration<half, KVLinearBuffer>(
-    const EnqueueGenerationParams<half, KVLinearBuffer>& params);
-
-template void GPTAttentionPluginCommon::prepareEnqueueGeneration<float, KVLinearBuffer>(
-    const EnqueueGenerationParams<float, KVLinearBuffer>& params);
-
-#ifdef ENABLE_BF16
-template void GPTAttentionPluginCommon::prepareEnqueueGeneration<__nv_bfloat16, KVLinearBuffer>(
-    const EnqueueGenerationParams<__nv_bfloat16, KVLinearBuffer>& params);
-#endif
-
-template void GPTAttentionPluginCommon::prepareEnqueueGeneration<half, KVBlockArray>(
-    const EnqueueGenerationParams<half, KVBlockArray>& params);
-
-template void GPTAttentionPluginCommon::prepareEnqueueGeneration<float, KVBlockArray>(
-    const EnqueueGenerationParams<float, KVBlockArray>& params);
-
-#ifdef ENABLE_BF16
-template void GPTAttentionPluginCommon::prepareEnqueueGeneration<__nv_bfloat16, KVBlockArray>(
-    const EnqueueGenerationParams<__nv_bfloat16, KVBlockArray>& params);
-#endif
-
 int GPTAttentionPluginCommon::initialize() noexcept
 {
     auto cublasHandle = getCublasHandle();
@@ -1449,38 +1319,24 @@ int GPTAttentionPluginCommon::initialize() noexcept
         // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
         mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, true, mNumKVHeads);
     }
-
-    bool useXQAKernels = (mEnableXQA || mIsMedusaEnabled) && !mCrossAttention
-        && (mType == nvinfer1::DataType::kHALF || mType == nvinfer1::DataType::kBF16);
-
-    if (useXQAKernels)
+    if (!mCrossAttention && mType == nvinfer1::DataType::kHALF)
     {
-        Data_type xqa_runner_data_type;
-        if (mType == nvinfer1::DataType::kHALF)
-        {
-            xqa_runner_data_type = DATA_TYPE_FP16;
-        }
-        else if (mType == nvinfer1::DataType::kBF16)
-        {
-            xqa_runner_data_type = DATA_TYPE_BF16;
-        }
-        TLLM_LOG_DEBUG("Enabling XQA kernels for GPTAttention.");
-        if (mIsMedusaEnabled)
-        {
-            TLLM_CHECK_WITH_INFO(mNumHeads % mNumKVHeads == 0, "mNumHeads should be multiples of mNumKVHeads.");
-            int numQHeadsPerKV = mNumHeads / mNumKVHeads;
-            bool isPowerOfTwo = ((numQHeadsPerKV & (numQHeadsPerKV - 1)) == 0);
-            TLLM_CHECK_WITH_INFO(isPowerOfTwo,
-                "numQHeadsPerKV should be power of 2 for Medusa, mNumHeads=%d, mNumKVHeads=%d.", mNumHeads,
-                mNumKVHeads);
-        }
+        Data_type xqa_runner_data_type = DATA_TYPE_FP16;
 
-        mDecoderXQARunner.reset(
-            new DecoderXQARunner(xqa_runner_data_type, mNumHeads, mNumKVHeads, mHeadSize, mMultiBlockMode));
-    }
-    else if (mIsMedusaEnabled)
-    {
-        TLLM_CHECK_WITH_INFO(false, "Medusa mode doesn't support the data type or cross attention.");
+        const char* enable_xqa_env_var = getenv("TRTLLM_ENABLE_XQA");
+        bool use_xqa = false;
+        if (enable_xqa_env_var != nullptr)
+        {
+            if (enable_xqa_env_var[0] == '1' && enable_xqa_env_var[1] == '\0')
+            {
+                use_xqa = true;
+            }
+        }
+        if (use_xqa)
+        {
+            mDecoderXQARunner.reset(
+                new DecoderXQARunner(xqa_runner_data_type, mNumHeads, mNumKVHeads, mHeadSize, mMultiBlockMode));
+        }
     }
 
     return 0;
@@ -1493,22 +1349,20 @@ void GPTAttentionPluginCommon::destroy() noexcept
 
 size_t GPTAttentionPluginCommon::getCommonSerializationSize() noexcept
 {
-    return sizeof(mLayerIdx) + sizeof(mNumHeads) + sizeof(mNumKVHeads) + sizeof(mHeadSize) + sizeof(mUnidirectional)
-        + sizeof(mQScaling) + sizeof(mPositionEmbeddingType) + sizeof(mRotaryEmbeddingDim)
-        + sizeof(mRotaryEmbeddingBase) + sizeof(mRotaryEmbeddingScaleType) + sizeof(mRotaryEmbeddingScale)
-        + sizeof(mRotaryEmbeddingMaxPositions) + sizeof(mTpSize) + sizeof(mTpRank) + sizeof(mEnableContextFMHA)
-        + sizeof(mFMHAForceFP32Acc) + sizeof(mMultiBlockMode) + sizeof(mEnableXQA)
-        + sizeof(unsigned int) // mKVCacheQuantMode
+    return sizeof(mNumHeads) + sizeof(mNumKVHeads) + sizeof(mHeadSize) + sizeof(mUnidirectional) + sizeof(mQScaling)
+        + sizeof(mPositionEmbeddingType) + sizeof(mRotaryEmbeddingDim) + sizeof(mRotaryEmbeddingBase)
+        + sizeof(mRotaryEmbeddingScaleType) + sizeof(mRotaryEmbeddingScale) + sizeof(mRotaryEmbeddingMaxPositions)
+        + sizeof(mTpSize) + sizeof(mTpRank) + sizeof(mEnableContextFMHA) + sizeof(mFMHAForceFP32Acc)
+        + sizeof(mMultiBlockMode) + sizeof(unsigned int) // mKVCacheQuantMode
         + sizeof(mRemovePadding) + sizeof(mMaskType) + sizeof(mPagedKVCache) + sizeof(mTokensPerBlock) + sizeof(mType)
         + sizeof(mMaxContextLength) + sizeof(mQKVBiasEnabled) + sizeof(mCrossAttention) + sizeof(mMaxDistance)
         + sizeof(mPosShiftEnabled) + sizeof(mDenseContextFMHA) + sizeof(mPagedContextFMHA) + sizeof(mUseKVCache)
-        + sizeof(mUnfuseQkvGemm) + sizeof(mIsMedusaEnabled);
+        + sizeof(mUnfuseQkvGemm);
 }
 
 void GPTAttentionPluginCommon::serializeCommon(void* buffer) const noexcept
 {
     char *d = static_cast<char*>(buffer), *a = d;
-    write(d, mLayerIdx);
     write(d, mNumHeads);
     write(d, mNumKVHeads);
     write(d, mHeadSize);
@@ -1526,7 +1380,6 @@ void GPTAttentionPluginCommon::serializeCommon(void* buffer) const noexcept
     write(d, mEnableContextFMHA);
     write(d, mFMHAForceFP32Acc);
     write(d, mMultiBlockMode);
-    write(d, mEnableXQA);
     write(d, mKVCacheQuantMode.value());
     write(d, mRemovePadding);
     write(d, mMaskType);
@@ -1541,7 +1394,6 @@ void GPTAttentionPluginCommon::serializeCommon(void* buffer) const noexcept
     write(d, mDenseContextFMHA);
     write(d, mPagedContextFMHA);
     write(d, mUseKVCache);
-    write(d, mIsMedusaEnabled);
     assert(d == a + getCommonSerializationSize());
 }
 
@@ -1572,7 +1424,6 @@ GPTAttentionPluginCreatorCommon::GPTAttentionPluginCreatorCommon()
     mPluginAttributes.emplace_back(PluginField("unfuse_qkv_gemm", nullptr, PluginFieldType::kINT8, 0));
     mPluginAttributes.emplace_back(PluginField("context_fmha_type", nullptr, PluginFieldType::kINT8, 0));
     mPluginAttributes.emplace_back(PluginField("multi_block_mode", nullptr, PluginFieldType::kINT8, 0));
-    mPluginAttributes.emplace_back(PluginField("enable_xqa", nullptr, PluginFieldType::kINT8, 0));
     mPluginAttributes.emplace_back(PluginField("kv_cache_quant_mode", nullptr, PluginFieldType::kINT32, 0));
     mPluginAttributes.emplace_back(PluginField("remove_input_padding", nullptr, PluginFieldType::kINT8, 0));
     mPluginAttributes.emplace_back(PluginField("mask_type", nullptr, PluginFieldType::kINT32, 0));
@@ -1587,7 +1438,6 @@ GPTAttentionPluginCreatorCommon::GPTAttentionPluginCreatorCommon()
     mPluginAttributes.emplace_back(PluginField("dense_context_fmha", nullptr, PluginFieldType::kINT8, 0));
     mPluginAttributes.emplace_back(PluginField("use_paged_context_fmha", nullptr, PluginFieldType::kINT8, 0));
     mPluginAttributes.emplace_back(PluginField("use_cache", nullptr, PluginFieldType::kINT32, 0));
-    mPluginAttributes.emplace_back(PluginField("is_medusa_enabled", nullptr, PluginFieldType::kINT8, 0));
     mFC.nbFields = mPluginAttributes.size();
     mFC.fields = mPluginAttributes.data();
 }

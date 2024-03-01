@@ -120,8 +120,8 @@ member variables and exposed through getters and setters):
    [Numerical Precision](precision.md).
  * `maxBatchSize`, indicates the maximum batch size that the TensorRT engine
    was built for,
- * `maxInputLen`, is the maximum size of the input sequences,
- * `maxSequenceLen`, is the maximum total size (input+output) of the sequences.
+ * `maxInputLen`/`maxOutputLen`, are the maximum sizes of the input/output
+   sequences.
 
 #### World Configuration
 
@@ -305,26 +305,20 @@ batchSize, beamWidth]`_.
  * `logProbs`, is a tensor of floating-point values on the GPU to store the
    log-prob of the generated tokens. Its shape is `[maxNewTokens, batchSize,
    beamWidth]`. Its shape will likely change in a future release to match the
-   shape of the output `ids` tensor.
+   shape of the output `ids` tensor,
  * `contextLogits`, is a tensor of values on the GPU (same datatype as the
    computation type) to store the logits for the context. Its shape is
    `[batchSize, maxSequenceLength, vocabSizePadded]`. If use `remove_input_padding`, its shape is `[packedSize, vocabSizePadded]`. This buffer will only be
-   filled in if the TensorRT engine was built with the `gather_context_logits` or
-   `gather_all_token_logits` parameter enabled.
-
-   After inference is complete, you can get the context logits in `GenerationOutput.contextLogits`, these are variables on the GPU. For specific acquisition methods, please refer to the example of [gptSessionBenchmark.cpp](https://github.com/NVIDIA/TensorRT-LLM/blob/main/benchmarks/cpp/gptSessionBenchmark.cpp).
-
-   It is important to point out
+   filled in if the TensorRT engine was built with the
+   `gather_all_token_logits` parameter enabled. It is important to point out
    that enabling that computation may have an impact on performance (the final
    LM head has to perform a matrix multiplication on all the context tokens
-   instead of a just the last one).
+   instead of a just the last one),
  * `generationLogits`, is a tensor of values on the GPU (same datatype as the
    computation type) to store the logits for the generation. Its shape is
    `[batchSize, beamWidth, maxOutputLen, vocabSizePadded]`. This buffer will only be
-   filled in if the TensorRT engine was built with the `gather_generation_logits` or
+   filled in if the TensorRT engine was built with the
    `gather_all_token_logits` parameter enabled.
-
-   Generation logits can also be obtained through `GenerationOutput.generationLogits` after inference is completed.
  * `onTokenGenerated`, is a callback function invoked in the generation loop to
    pass newly generated tokens to the caller while the loop continues to
    execute. An implementation of that callback must accept the output `ids`
@@ -398,11 +392,7 @@ sequences. If both `topK` and `topP` are zero, greedy search is performed.
    penalized by a factor that depends on `1.f / (length ^ lengthPenalty)`). The
    default is value `0.f`. The parameter `lengthPenalty` may be renamed to
    `beamSearchLengthPenalty` in a future release,
- * `earlyStopping`, a integer value that controls whether the generation process
-   finishes once `beamWidth` sentences are generated (end up with end_token).
-   Default value 1 means earlyStopping is enabled, value 0 means earlyStopping
-   is disable, other values  means the generation process is depended on
-   `length_penalty`.
+
 The `beamWidth` parameter is a scalar value. It means that in this release of
 TensorRT-LLM, it is not possible to specify a different width for each input
 sequence. This limitation is likely to be removed in a future release.

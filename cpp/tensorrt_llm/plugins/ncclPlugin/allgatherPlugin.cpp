@@ -45,11 +45,7 @@ AllgatherPlugin::AllgatherPlugin(const void* data, size_t length)
         read(d, groupItem);
         mGroup.insert(groupItem);
     }
-    TLLM_CHECK_WITH_INFO(d == a + length,
-        "Expected length (%d) != real length (%d). This is often "
-        "caused by using different TensorRT-LLM version to build "
-        "engine and run engine.",
-        (int) length, (int) (d - a));
+    TLLM_CHECK(d == a + length);
 }
 
 // IPluginV2DynamicExt Methods
@@ -90,6 +86,7 @@ size_t AllgatherPlugin::getWorkspaceSize(const nvinfer1::PluginTensorDesc* input
 int AllgatherPlugin::enqueue(const nvinfer1::PluginTensorDesc* inputDesc, const nvinfer1::PluginTensorDesc* outputDesc,
     const void* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream) noexcept
 {
+    return 0;
     if (isBuilding())
     {
         return 0;
@@ -133,7 +130,7 @@ int AllgatherPlugin::getNbOutputs() const noexcept
 
 int AllgatherPlugin::initialize() noexcept
 {
-    initCommMap(mGroup);
+    // initCommMap(mGroup);
     return 0;
 }
 

@@ -101,11 +101,7 @@ WeightOnlyQuantMatmulPlugin::WeightOnlyQuantMatmulPlugin(
 
     mPluginProfiler->deserialize(d, mDims, mGemmId);
 
-    TLLM_CHECK_WITH_INFO(d == a + length,
-        "Expected length (%d) != real length (%d). This is often "
-        "caused by using different TensorRT-LLM version to build "
-        "engine and run engine.",
-        (int) length, (int) (d - a));
+    TLLM_CHECK(d == a + length);
 }
 
 void WeightOnlyQuantMatmulPlugin::init(nvinfer1::DataType type, WeightTypeId weightTypeId)
@@ -318,7 +314,7 @@ int WeightOnlyQuantMatmulPlugin::enqueue(const nvinfer1::PluginTensorDesc* input
         weight_only_quant_type = tensorrt_llm::kernels::WeightOnlyQuantType::Int4b;
         real_n = n * INT8_INT4_RATIO;
     }
-    if (use_cuda_kernel && getSMVersion() < 90)
+    if (use_cuda_kernel)
     {
         // Use CUDA kernels for small batch size
         // The CUDA kernel is designed for ColumnMajorTileInterleave weight layout used in fpAIntB cutlass

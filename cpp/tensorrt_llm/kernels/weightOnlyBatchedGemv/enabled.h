@@ -41,12 +41,6 @@ struct SupportedLayout<cutlass::uint4b_t, cutlass::layout::ColumnMajorTileInterl
     static constexpr bool value = true;
 };
 
-template <>
-struct SupportedLayout<cutlass::uint4b_t, cutlass::layout::ColumnMajor>
-{
-    static constexpr bool value = true;
-};
-
 template <typename TypeB, typename Arch>
 bool isEnabled()
 {
@@ -59,19 +53,15 @@ bool isEnabledForArch(int arch)
 {
     if (arch >= 70 && arch < 75)
     {
-        return false;
+        return isEnabled<TypeB, cutlass::arch::Sm70>();
     }
     else if (arch >= 75 && arch < 80)
     {
         return isEnabled<TypeB, cutlass::arch::Sm75>();
     }
-    else if (arch >= 80 && arch < 90)
+    else if (arch >= 80 && arch <= 90)
     {
         return isEnabled<TypeB, cutlass::arch::Sm80>();
-    }
-    else if (arch >= 90)
-    {
-        return isEnabled<TypeB, cutlass::arch::Sm90>();
     }
     else
     {

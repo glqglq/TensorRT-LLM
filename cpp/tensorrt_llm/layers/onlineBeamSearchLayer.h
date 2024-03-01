@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,11 +41,10 @@ public:
     public:
         std::optional<std::vector<float>> beam_search_diversity_rate; // [1] or [batch_size] on cpu
         std::optional<std::vector<float>> length_penalty;             // [1] or [batch_size] on cpu
-        std::optional<std::vector<int>> early_stopping;               // [1] or [batch_size] on cpu
     };
 
-    OnlineBeamSearchLayer(
-        size_t vocab_size, size_t vocab_size_padded, cudaStream_t stream, std::shared_ptr<tc::IAllocator> allocator);
+    OnlineBeamSearchLayer(size_t vocab_size, size_t vocab_size_padded, cudaStream_t stream,
+        std::shared_ptr<tc::IAllocator> allocator, bool is_free_buffer_after_forward);
 
     OnlineBeamSearchLayer(OnlineBeamSearchLayer<T> const& beam_search_layer);
 
@@ -66,16 +65,14 @@ protected:
 
     void invokeSoftMax(BeamSearchOutputParams& outputs, SoftmaxParams const& params) override;
 
-    using Base::mStream;
-    using Base::mIsAllocateBuffer;
-    using Base::mAllocator;
+    using Base::stream_;
+    using Base::is_allocate_buffer_;
+    using Base::allocator_;
 
     std::vector<float> mDiversityRate;
     std::vector<float> mLengthPenalty;
-    std::vector<int> mEarlyStopping;
     float* diversity_rates_buf_;
     float* length_penalties_buf_;
-    int* early_stoppings_buf_;
 
 private:
     void allocateBuffer(size_t batch_size);

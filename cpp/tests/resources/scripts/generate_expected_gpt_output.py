@@ -21,12 +21,9 @@ import run
 
 def generate_output(engine: str,
                     num_beams: int,
-                    input_name: str,
                     output_name: str,
                     max_output_len: int = 8,
-                    output_logits: bool = False,
-                    output_cum_log_probs: bool = False,
-                    output_log_probs: bool = False):
+                    output_logits: bool = False):
     tp_size = 1
     pp_size = 1
     model = 'gpt2'
@@ -36,7 +33,7 @@ def generate_output(engine: str,
     engine_dir = models_dir / 'rt_engine' / model / engine / tp_pp_dir
 
     data_dir = resources_dir / 'data'
-    input_file = data_dir / (input_name + '.npy')
+    input_file = data_dir / 'input_tokens.npy'
     model_data_dir = data_dir / model
     if num_beams <= 1:
         output_dir = model_data_dir / 'sampling'
@@ -49,7 +46,7 @@ def generate_output(engine: str,
     if output_logits:
         output_logits_npy = str(output_dir / (output_name + '_logits' + '.npy'))
 
-    args_list = [
+    args = run.parse_arguments([
         '--engine_dir',
         str(engine_dir), '--input_file',
         str(input_file), '--tokenizer_dir',
@@ -59,24 +56,7 @@ def generate_output(engine: str,
         str(max_output_len), '--num_beams',
         str(num_beams), '--output_logits_npy',
         str(output_logits_npy), '--use_py_session'
-    ]
-
-    output_cum_log_probs_npy = None
-    if output_cum_log_probs:
-        output_cum_log_probs_npy = str(
-            output_dir / (output_name + '_cum_log_probs' + '.npy'))
-        args_list.extend(
-            ['--output_cum_log_probs_npy',
-             str(output_cum_log_probs_npy)])
-
-    output_log_probs_npy = None
-    if output_log_probs:
-        output_log_probs_npy = str(output_dir /
-                                   (output_name + '_log_probs' + '.npy'))
-        args_list.extend(['--output_log_probs_npy', str(output_log_probs_npy)])
-
-    args = run.parse_arguments(args_list)
-
+    ])
     run.main(args)
 
 
@@ -85,62 +65,35 @@ def generate_outputs(num_beams):
     if num_beams == 1:
         generate_output(engine='fp32-default',
                         num_beams=num_beams,
-                        input_name='input_tokens',
                         output_name='output_tokens_fp32')
     generate_output(engine='fp32-plugin',
                     num_beams=num_beams,
-                    input_name='input_tokens',
                     output_name='output_tokens_fp32_plugin')
 
     print('Generating GPT2 FP16 outputs')
     if num_beams == 1:
         generate_output(engine='fp16-default',
                         num_beams=num_beams,
-                        input_name='input_tokens',
                         output_name='output_tokens_fp16')
     generate_output(engine='fp16-plugin',
                     num_beams=num_beams,
-                    input_name='input_tokens',
                     output_name='output_tokens_fp16_plugin')
     generate_output(engine='fp16-plugin-packed',
                     num_beams=num_beams,
-                    input_name='input_tokens',
                     output_name='output_tokens_fp16_plugin_packed')
     generate_output(engine='fp16-plugin-packed-paged-gather',
                     num_beams=num_beams,
-                    input_name='input_tokens',
                     output_name='output_tokens_fp16_plugin_packed_paged_gather',
                     output_logits=True)
     generate_output(
         engine='fp16-plugin-packed-paged-context-fmha-for-gen',
         num_beams=num_beams,
-        input_name='input_tokens',
         output_name=
         'output_tokens_fp16_plugin_packed_paged_context_fmha_for_gen',
         output_logits=False)
     generate_output(engine='fp16-plugin-packed-paged',
                     num_beams=num_beams,
-                    input_name='input_tokens',
                     output_name='output_tokens_fp16_plugin_packed_paged',
-                    output_logits=False,
-                    output_log_probs=(num_beams == 1),
-                    output_cum_log_probs=(num_beams == 1))
-    generate_output(engine='fp16-plugin-packed-paged',
-                    num_beams=num_beams,
-                    input_name='input_tokens',
-                    output_name='output_tokens_long_fp16_plugin_packed_paged',
-                    output_logits=False,
-                    max_output_len=128)
-    generate_output(
-        engine='fp16-plugin-packed-paged',
-        num_beams=num_beams,
-        input_name='input_tokens_long',
-        output_name='output_tokens_long_input_fp16_plugin_packed_paged',
-        output_logits=False)
-    generate_output(engine='fp16-plugin-packed-paged-sq',
-                    num_beams=num_beams,
-                    input_name='input_tokens',
-                    output_name='output_tokens_fp16_plugin_packed_paged_sq',
                     output_logits=False)
 
 

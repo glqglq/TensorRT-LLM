@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/runtime/common.h"
 
 #include <optional>
@@ -33,20 +32,12 @@ public:
     explicit KvCacheConfig(std::optional<SizeType> maxTokens = std::nullopt,
         std::optional<SizeType> maxAttentionWindow = std::nullopt,
         std::optional<SizeType> sinkTokenLength = std::nullopt,
-        std::optional<float> freeGpuMemoryFraction = std::nullopt, bool enableBlockReuse = false, bool useUvm = false)
+        std::optional<float> freeGpuMemoryFraction = std::nullopt, bool enableBlockReuse = false)
         : maxTokens{maxTokens}
         , maxAttentionWindow{maxAttentionWindow}
         , sinkTokenLength{sinkTokenLength}
         , freeGpuMemoryFraction{freeGpuMemoryFraction}
         , enableBlockReuse(enableBlockReuse)
-        , useUvm(useUvm)
-    {
-    }
-
-    explicit KvCacheConfig(executor::KvCacheConfig const& kvCacheConfig)
-        : KvCacheConfig(kvCacheConfig.getMaxTokens(), kvCacheConfig.getMaxAttentionWindow(),
-            kvCacheConfig.getSinkTokenLength(), kvCacheConfig.getFreeGpuMemoryFraction(),
-            kvCacheConfig.getEnableBlockReuse(), kvCacheConfig.getUseUvm())
     {
     }
 
@@ -55,7 +46,6 @@ public:
     std::optional<SizeType> sinkTokenLength;
     std::optional<float> freeGpuMemoryFraction;
     bool enableBlockReuse;
-    static constexpr auto kDefaultGpuMemFraction = 0.9f;
-    bool useUvm;
+    static constexpr auto kDefaultGpuMemFraction = 0.85f;
 };
 } // namespace tensorrt_llm::batch_manager::kv_cache_manager

@@ -613,7 +613,7 @@ class TestSmoothQuant(unittest.TestCase):
         ref_torch_weights, processed_torch_weights, torch_weight_scales = _utils.woq_conversion(
             weight, wTypeId)
         if wTypeId == 2:
-            ref_torch_weights = torch.ops.trtllm.unpack_int4_packed_tensor_to_int8(
+            ref_torch_weights = torch.ops.fastertransformer.unpack_int4_packed_tensor_to_int8(
                 ref_torch_weights)
 
         bias_data = None
@@ -939,7 +939,6 @@ class TestSmoothQuant(unittest.TestCase):
 
         # instantiate full gpt model before isolating its attention module
         tensorrt_llm_gpt = tensorrt_llm.quantization.layers.SmoothQuantAttention(
-            layer_idx=0,
             hidden_size=hidden_size,
             num_attention_heads=num_heads,
             max_position_embeddings=n_positions,

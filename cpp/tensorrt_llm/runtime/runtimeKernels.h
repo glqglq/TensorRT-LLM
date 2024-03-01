@@ -51,8 +51,6 @@ void invokeTransposeWithInputOffset(
 
 void invokeInclusiveSum(IBuffer& output, IBuffer const& input, BufferManager const& manager, CudaStream const& stream);
 
-void invokeInclusiveSum(IBuffer& output, IBuffer& tmpBuffer, IBuffer const& input, CudaStream const& stream);
-
 void invokeBuildTokenMask(
     ITensor& tokenMask, ITensor const& inputLengths, SizeType maxInputLength, CudaStream const& stream);
 
@@ -77,8 +75,6 @@ void initOutputIds(ITensor& outputIds, ITensor const& inputIds, ITensor const& i
     CudaStream const& stream);
 
 void scatterTensor(ITensor& output, ITensor const& input, SizeType beamWidth, CudaStream const& stream);
-
-void splitTransposed(ITensor& output, ITensor const& input, SizeType split, CudaStream const& stream);
 
 void tileTensor(ITensor& output, ITensor const& input, SizeType beamWidth, CudaStream const& stream);
 

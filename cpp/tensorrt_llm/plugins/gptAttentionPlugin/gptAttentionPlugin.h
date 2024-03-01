@@ -46,7 +46,7 @@ namespace tensorrt_llm::plugins
 //                      enable_remove_input_padding
 //     1.  sequence_length [batch_size] (optional)
 //     2.  host_past_key_value_lengths [batch_size] (int32) (optional)
-//     3.  host_max_attention_window_sizes [num_layers] (int32)
+//     3.  host_max_attention_window_sizes [1] (int32)
 //     4.  host_sink_token_length [1] (int32)
 //     5.  context_lengths [batch_size]
 //     6.  cache_indir [num_gen_requests, beam_width, memory_max_len] (required in beamsearch) (optional)
@@ -54,8 +54,8 @@ namespace tensorrt_llm::plugins
 //     mode,
 //                      all elements must be identical.
 //     8.  past_key_value_pool [batch_size, 2, local_num_kv_heads, max_seq_len, head_size] or
-//         block_pointers [num_layers, batch_size, 2, max_blocks_per_seq] if paged kv cache (optional)
-//     8.1 host_block_pointers [num_layers, batch_size, 2, max_blocks_per_seq] if paged kv cache (optional)
+//         block_pointers [batch_size, 2, max_blocks_per_seq] if paged kv cache (optional)
+//     8.1 host_block_pointers [batch_size, 2, max_blocks_per_seq] if paged kv cache (optional)
 //     9.  kv_cache_quantization_scale [1] (optional)
 //     10. kv_cache_dequantization_scale [1] (optional)
 //     11. alibi_slopes [num_heads] (optional for ALiBi position embedding)
@@ -70,18 +70,17 @@ namespace tensorrt_llm::plugins
 class GPTAttentionPlugin : public GPTAttentionPluginCommon
 {
 public:
-    GPTAttentionPlugin(int layer_idx, int num_heads, int num_kv_heads, int head_size, int unidirectional,
-        float q_scaling, tensorrt_llm::kernels::PositionEmbeddingType position_embedding_type,
+    GPTAttentionPlugin(int num_heads, int num_kv_heads, int head_size, int unidirectional, float q_scaling,
+        tensorrt_llm::kernels::PositionEmbeddingType position_embedding_type,
         int rotary_embedding_dim, // for RoPE. 0 for non-RoPE
         float rotary_embedding_base, tensorrt_llm::kernels::RotaryScalingType rotary_embedding_scale_type,
         float rotary_embedding_scale, int rotary_embedding_max_positions, int tp_size, int tp_rank, // for ALiBi
         bool unfuse_qkv_gemm,                                                                       // for AutoPP
-        tensorrt_llm::kernels::ContextFMHAType context_fmha_type, bool multi_block_mode, bool enable_xqa,
-        int kv_cache_quant_mode, bool remove_input_padding, tensorrt_llm::kernels::AttentionMaskType mask_type,
-        bool paged_kv_cache, int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length,
-        bool qkv_bias_enabled, bool cross_attention = false, int max_distance = 0, bool pos_shift_enabled = false,
-        bool dense_context_fmha = false, bool use_paged_context_fmha = false, bool use_cache = true,
-        bool is_medusa_enabled = false);
+        tensorrt_llm::kernels::ContextFMHAType context_fmha_type, bool multi_block_mode, int kv_cache_quant_mode,
+        bool remove_input_padding, tensorrt_llm::kernels::AttentionMaskType mask_type, bool paged_kv_cache,
+        int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length, bool qkv_bias_enabled,
+        bool cross_attention = false, int max_distance = 0, bool pos_shift_enabled = false,
+        bool dense_context_fmha = false, bool use_paged_context_fmha = false, bool use_cache = true);
 
     GPTAttentionPlugin(const void* data, size_t length);
 
@@ -93,6 +92,8 @@ public:
 
     bool supportsFormatCombination(
         int pos, const nvinfer1::PluginTensorDesc* inOut, int nbInputs, int nbOutputs) noexcept override;
+    void configurePlugin(const nvinfer1::DynamicPluginTensorDesc* in, int nbInputs,
+        const nvinfer1::DynamicPluginTensorDesc* out, int nbOutputs) noexcept override;
     size_t getWorkspaceSize(const nvinfer1::PluginTensorDesc* inputs, int nbInputs,
         const nvinfer1::PluginTensorDesc* outputs, int nbOutputs) const noexcept override;
     int enqueue(const nvinfer1::PluginTensorDesc* inputDesc, const nvinfer1::PluginTensorDesc* outputDesc,
@@ -106,15 +107,6 @@ public:
     int enqueueDispatchKVCacheType(const nvinfer1::PluginTensorDesc* inputDesc,
         const nvinfer1::PluginTensorDesc* outputDesc, const void* const* inputs, void* const* outputs, void* workspace,
         cudaStream_t stream);
-
-    template <typename T, typename KVCacheBuffer>
-    void configurePluginImpl(const nvinfer1::DynamicPluginTensorDesc* in, int nbInputs,
-        const nvinfer1::DynamicPluginTensorDesc* out, int nbOutputs) noexcept;
-    template <typename T>
-    void configurePluginDispatchKVCacheType(const nvinfer1::DynamicPluginTensorDesc* in, int nbInputs,
-        const nvinfer1::DynamicPluginTensorDesc* out, int nbOutputs) noexcept;
-    void configurePlugin(const nvinfer1::DynamicPluginTensorDesc* in, int nbInputs,
-        const nvinfer1::DynamicPluginTensorDesc* out, int nbOutputs) noexcept override;
 
     // IPluginV2Ext Methods
     nvinfer1::DataType getOutputDataType(
@@ -171,18 +163,12 @@ private:
         ENCODER_INPUT_LENGTH,
         HOST_CONTEXT_LENGTH,
         QKV_BIAS_TENSOR,
-        MEDUSA_PACKED_MASK,
-        MEDUSA_POSITION_OFFSETS,
         ENUM_SIZE,
     };
 
     bool isEntryUsed(const IdxEntry& entry) const;
     void initEntryIdx();
     IndexType getIdx(const IdxEntry& entry) const;
-
-    // Get generation input sequence length (might be larger than 1 in the Medusa mode).
-    int getGenerationInputSequenceLength(
-        const nvinfer1::PluginTensorDesc* inputDesc, int32_t localNbSeq, int32_t localNbTokens) const;
 };
 
 class GPTAttentionPluginCreator : public GPTAttentionPluginCreatorCommon

@@ -17,7 +17,6 @@
 #pragma once
 
 #include "tensorrt_llm/runtime/bufferView.h"
-#include "tensorrt_llm/runtime/iTensor.h"
 
 #include <stdexcept>
 
@@ -49,7 +48,7 @@ public:
         : BufferView{buffer, offset, size}
         , mDims{dims}
     {
-        Base::resize(ITensor::volumeNonNegative(dims));
+        Base::resize(nonNegative(volume(dims)));
     }
 
     [[nodiscard]] nvinfer1::Dims const& getShape() const override
@@ -59,7 +58,7 @@ public:
 
     void reshape(nvinfer1::Dims const& dims) override
     {
-        Base::resize(ITensor::volumeNonNegative(dims));
+        Base::resize(nonNegative(volume(dims)));
         mDims = dims;
     }
 

@@ -22,7 +22,6 @@ import torch
 import torch.multiprocessing as mp
 
 import tensorrt_llm
-from tensorrt_llm._common import check_max_num_tokens
 from tensorrt_llm._utils import str_dtype_to_trt
 from tensorrt_llm.builder import Builder
 from tensorrt_llm.layers import MoeConfig, PositionEmbeddingType
@@ -153,6 +152,16 @@ def parse_arguments(args):
         choices=['float16', 'float32', 'bfloat16'],
         help=
         "Activates GEMM plugin. You can specify the plugin dtype or leave blank to use the model dtype."
+    )
+    parser.add_argument(
+        '--use_layernorm_plugin',
+        nargs='?',
+        const=None,
+        type=str,
+        default=False,
+        choices=['float16', 'float32', 'bfloat16'],
+        help=
+        "Activates layernorm plugin. You can specify the plugin dtype or leave blank to use the model dtype."
     )
     parser.add_argument('--parallel_build', default=False, action='store_true')
     parser.add_argument('--enable_context_fmha',
@@ -297,19 +306,9 @@ def parse_arguments(args):
         default=False,
         choices=['float16', 'float32', 'bfloat16'],
         help="Activates the lookup plugin which enables embedding sharing.")
-    parser.add_argument(
-        '--gather_all_token_logits',
-        action='store_true',
-        default=False,
-        help='Enable both gather_context_logits and gather_generation_logits')
-    parser.add_argument('--gather_context_logits',
+    parser.add_argument('--gather_all_token_logits',
                         action='store_true',
-                        default=False,
-                        help='Gather context logits')
-    parser.add_argument('--gather_generation_logits',
-                        action='store_true',
-                        default=False,
-                        help='Gather generation logits')
+                        default=False)
 
     parser.add_argument('--enable_fp8', default=False, action='store_true')
     parser.add_argument(
@@ -323,9 +322,7 @@ def parse_arguments(args):
         '--max_num_tokens',
         type=int,
         default=None,
-        help=
-        'Define the max number of tokens supported by the engine, note that it takes no effect if --remove_input_padding is not set'
-    )
+        help='Define the max number of tokens supported by the engine')
     parser.add_argument(
         '--strongly_typed',
         default=False,
@@ -370,9 +367,6 @@ def parse_arguments(args):
         default=None,
         choices=[
             "attn_qkv",
-            "attn_q",
-            "attn_k",
-            "attn_v",
             "attn_dense",
             "mlp_h_to_4h",
             "mlp_gate",
@@ -381,12 +375,6 @@ def parse_arguments(args):
         help=
         "Add lora in which modules. Only be activated when use_lora_plugin is enabled."
     )
-    parser.add_argument(
-        '--max_lora_rank',
-        type=int,
-        default=64,
-        help='maximum lora rank for different lora modules. '
-        'It is used to compute the workspace size of lora plugin.')
     parser.add_argument(
         '--moe_num_experts',
         default=0,
@@ -428,8 +416,8 @@ def parse_arguments(args):
 
     override_args_from_model_dir(args)
     plugins_args = [
-        'use_gpt_attention_plugin', 'use_gemm_plugin', 'use_lookup_plugin',
-        'use_lora_plugin'
+        'use_gpt_attention_plugin', 'use_gemm_plugin', 'use_layernorm_plugin',
+        'use_lookup_plugin', 'use_lora_plugin'
     ]
     for plugin_arg in plugins_args:
         if getattr(args, plugin_arg) is None:
@@ -467,7 +455,7 @@ def parse_arguments(args):
                                                      args.per_channel)
     elif args.use_weight_only:
         args.quant_mode = QuantMode.use_weight_only(
-            use_int4_weights=(args.weight_only_precision == 'int4'))
+            args.weight_only_precision == 'int4')
     else:
         args.quant_mode = QuantMode(0)
 
@@ -492,23 +480,14 @@ def parse_arguments(args):
         assert rotary_scaling["factor"] > 1.0
         args.rotary_scaling = rotary_scaling
 
-    args.max_num_tokens = check_max_num_tokens(
-        max_num_tokens=args.max_num_tokens,
-        max_batch_size=args.max_batch_size,
-        max_input_len=args.max_input_len,
-        remove_input_padding=args.remove_input_padding,
-        enable_context_fmha=args.enable_context_fmha,
-        tokens_per_block=args.tokens_per_block)
+    if args.max_num_tokens is not None:
+        assert args.enable_context_fmha or args.enable_context_fmha_fp32_acc
 
     if args.moe_num_experts and args.moe_top_k == 0:
         args.moe_top_k = 1
     args.moe_config = MoeConfig(args.moe_num_experts, args.moe_top_k,
                                 args.moe_tp_mode,
                                 args.moe_renorm_mode).validate()
-
-    if args.gather_all_token_logits:
-        args.gather_context_logits = True
-        args.gather_generation_logits = True
 
     return args
 
@@ -542,8 +521,7 @@ def build_rank_engine(builder: Builder,
 
     if share_embedding_table:
         logger.info(
-            'Engine will try to share embedding and language modeling weights. Note: Flag --use_lookup_plugin and --use_gemm_plugin are also needed for now.'
-        )
+            'Engine will share embedding and language modeling weights.')
 
     # Initialize Module
     tensorrt_llm_gpt = tensorrt_llm.models.GPTLMHeadModel(
@@ -574,7 +552,6 @@ def build_rank_engine(builder: Builder,
         embedding_sharding_dim=args.embedding_sharding_dim,
         share_embedding_table=share_embedding_table,
         moe_config=args.moe_config,
-        max_lora_rank=args.max_lora_rank,
     )
 
     if args.use_smooth_quant or args.use_weight_only:
@@ -607,7 +584,6 @@ def build_rank_engine(builder: Builder,
     # Module -> Network
     network = builder.create_network()
     network.trt_network.name = engine_name
-    network.plugin_config.to_legacy_setting()
     if args.use_gpt_attention_plugin:
         network.plugin_config.set_gpt_attention_plugin(
             dtype=args.use_gpt_attention_plugin)
@@ -617,6 +593,9 @@ def build_rank_engine(builder: Builder,
         else:
             logger.info(
                 "Gemm plugin does not support FP8. Disabled Gemm plugin.")
+    if args.use_layernorm_plugin:
+        network.plugin_config.set_layernorm_plugin(
+            dtype=args.use_layernorm_plugin)
     assert not (args.enable_context_fmha and args.enable_context_fmha_fp32_acc)
     if args.enable_context_fmha:
         network.plugin_config.set_context_fmha(ContextFMHAType.enabled)
@@ -669,15 +648,14 @@ def build_rank_engine(builder: Builder,
 
         # Forward
         inputs = tensorrt_llm_gpt.prepare_inputs(
-            max_batch_size=args.max_batch_size,
-            max_input_len=args.max_input_len,
-            max_seq_len=args.max_input_len + args.max_output_len,
-            use_cache=True,
-            max_beam_width=args.max_beam_width,
-            max_num_tokens=args.max_num_tokens,
+            args.max_batch_size,
+            args.max_input_len,
+            args.max_output_len,
+            True,
+            args.max_beam_width,
+            args.max_num_tokens,
             prompt_embedding_table_size=args.max_prompt_embedding_table_size,
-            gather_context_logits=args.gather_context_logits,
-            gather_generation_logits=args.gather_generation_logits,
+            gather_all_token_logits=args.gather_all_token_logits,
             max_draft_len=args.max_draft_len,
             lora_target_modules=args.lora_target_modules)
         tensorrt_llm_gpt(*inputs)
@@ -739,12 +717,10 @@ def build(rank, args):
             strongly_typed=args.strongly_typed,
             max_prompt_embedding_table_size=args.
             max_prompt_embedding_table_size,
-            gather_context_logits=args.gather_context_logits,
-            gather_generation_logits=args.gather_generation_logits,
+            gather_all_token_logits=args.gather_all_token_logits,
             quant_mode=args.quant_mode,
             use_parallel_embedding=args.use_parallel_embedding,
             lora_target_modules=args.lora_target_modules,
-            max_lora_rank=args.max_lora_rank,
         )
 
         engine_name = get_engine_name(MODEL_NAME, args.dtype, args.world_size,
@@ -767,7 +743,8 @@ def build(rank, args):
             paged_kv_cache=args.paged_kv_cache,
             max_batch_size=args.max_batch_size,
             max_beam_width=args.max_beam_width,
-            max_seq_len=args.max_input_len + args.max_output_len,
+            max_input_len=args.max_input_len,
+            max_output_len=args.max_output_len,
             local_num_kv_heads=local_num_kv_heads,
             head_size=args.n_embd / args.n_head,
             num_layers=args.n_layer)

@@ -49,6 +49,16 @@ static const struct TmaKernelMetaInfo
 } sTmaMetaInfo[] = {{32, 64, 256}, {64, 64, 256}, {128, 64, 128}, {256, 64, 64}};
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// meta info for tma warp-specialized kernels that supports paged kv cache
+static const struct TmaPagedKVKernelMetaInfo
+{
+    unsigned int mD;
+    unsigned int mQStep;
+    unsigned int mKVStep;
+} sTmaPagedKVMetaInfo[] = {{32, 64, 128}, {64, 64, 128}, {128, 64, 128}, {256, 64, 64}};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 // Base Class
 
 template <typename TKernelMeta, typename TKernelParam>
@@ -242,6 +252,7 @@ public:
     virtual void run(
         Fused_multihead_attention_params_v2& params, Launch_params& launch_params, cudaStream_t stream) const
     {
+
         bool forceUnroll = launch_params.force_unroll;
         if (!forceUnroll && !launch_params.ignore_b1opt && mSM >= kSM_80)
         {
@@ -314,8 +325,7 @@ public:
 
             // 2 * 2 stands for kv cache and 2 bytes per element.
             size_t size_in_bytes = block_size.y * params.s * params.d * 2 * 2;
-            // Take uGPU into consideration.
-            if (size_in_bytes <= launch_params.device_l2_cache_size / 2)
+            if (size_in_bytes <= launch_params.device_l2_cache_size)
             {
                 // strategy 1: limit to only 1 wave
                 block_size.x = std::min(m_steps / NUM_COMPUTE_GROUPS, sms_per_head);
@@ -339,19 +349,8 @@ public:
             {
                 unroll = (params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep;
             }
-
-            if (mSM == kSM_70)
-            {
-                if (kernelMeta.mSharedMemBytes >= 48 * 1024)
-                {
-                    cudaFuncSetAttribute(func, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelMeta.mSharedMemBytes);
-                }
-                cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
-            }
             // on Hopper non-flash-attention, we still launch blocks (h, b, steps)
-            else if (mSM == kSM_90 && !launch_params.flash_attention)
+            if (mSM == kSM_90 && !launch_params.flash_attention)
             {
                 cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
                                kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
@@ -444,8 +443,7 @@ public:
 
             // 2 * 2 stands for kv cache and 2 bytes per element.
             size_t size_in_bytes = block_size.y * launch_params.kernel_kv_s * params.d * 2 * 2;
-            // Take uGPU into consideration.
-            if (size_in_bytes <= launch_params.device_l2_cache_size / 2)
+            if (size_in_bytes <= launch_params.device_l2_cache_size)
             {
                 // strategy 1: limit to only 1 wave
                 block_size.x = std::min(m_steps / NUM_COMPUTE_GROUPS, sms_per_head);

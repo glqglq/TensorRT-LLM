@@ -1,0 +1,30 @@
+CUDA_VISIBLE_DEVICES=1 ncu \
+	--export ../log/llama27b_in128_out2_bs4 \
+	--force-overwrite \
+	--target-processes application-only \
+	--replay-mode application \
+	--app-replay-match grid \
+	--app-replay-mode relaxed \
+	--kernel-name-base function \
+	--launch-skip-before-match 0 \
+	--filter-mode global \
+	--section LaunchStats \
+	--section Occupancy \
+	--section SpeedOfLight \
+	--sampling-interval auto \
+	--sampling-max-passes 5 \
+	--sampling-buffer-size 33554432 \
+	--profile-from-start 1 \
+	--cache-control all \
+	--clock-control base \
+	--rule LaunchConfiguration \
+	--rule Occupancy \
+	--rule SOLBottleneck \
+	--import-source no \
+	--check-exit-code yes \
+        python /code/tensorrt_llm/benchmarks/python/benchmark.py \
+        	--batch_size 4 \
+        	--input_output_len 128,2 \
+        	--warm_up 0 \
+        	--duration 3 \
+        	--engine_dir ../models/engine-llama-2-7b-fp16/

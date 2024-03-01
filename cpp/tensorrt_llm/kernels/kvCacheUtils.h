@@ -16,7 +16,6 @@
 #pragma once
 
 #include "tensorrt_llm/common/assert.h"
-#include <cmath>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <limits>

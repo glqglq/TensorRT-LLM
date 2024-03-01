@@ -19,9 +19,6 @@ set(SRCS
     utils/sessionUtils.cpp
     utils/debugUtils.cu
     bufferManager.cpp
-    loraManager.cpp
-    loraUtils.cpp
-    loraModule.cpp
     decodingOutput.cpp
     gptDecoder.cpp
     gptDecoderBatch.cpp
@@ -31,7 +28,6 @@ set(SRCS
     iTensor.cpp
     ipcUtils.cpp
     memoryCounters.cpp
-    medusaModule.cpp
     ncclCommunicator.cpp
     promptTuningParams.cpp
     runtimeBuffers.cpp
@@ -43,7 +39,7 @@ set(SRCS
 
 include_directories(${API_INCLUDE_DIR}/tensorrt_llm/runtime)
 
-if(NOT WIN32)
+if(NOT MSVC)
   # additional warnings
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
   if(WARNING_IS_ERROR)

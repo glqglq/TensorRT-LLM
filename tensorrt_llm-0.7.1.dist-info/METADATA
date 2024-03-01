@@ -1,0 +1,51 @@
+Metadata-Version: 2.1
+Name: tensorrt-llm
+Version: 0.7.1
+Summary: TensorRT-LLM: A TensorRT Toolbox for Large Language Models
+Home-page: https://github.com/NVIDIA/TensorRT-LLM
+Download-URL: https://github.com/NVIDIA/TensorRT-LLM/tags
+Author: NVIDIA Corporation
+License: Apache License 2.0
+Keywords: nvidia tensorrt deeplearning inference
+Platform: UNKNOWN
+Classifier: Development Status :: 4 - Beta
+Classifier: License :: Apache License 2.0
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3.10
+Requires-Python: >=3.7, <4
+License-File: LICENSE
+Requires-Dist: accelerate ==0.25.0
+Requires-Dist: build
+Requires-Dist: colored
+Requires-Dist: cuda-python ==12.2.0
+Requires-Dist: diffusers ==0.15.0
+Requires-Dist: lark
+Requires-Dist: mpi4py
+Requires-Dist: numpy
+Requires-Dist: onnx >=1.12.0
+Requires-Dist: polygraphy
+Requires-Dist: psutil
+Requires-Dist: pynvml >=11.5.0
+Requires-Dist: sentencepiece >=0.1.99
+Requires-Dist: torch
+Requires-Dist: transformers ==4.36.1
+Requires-Dist: wheel
+Requires-Dist: optimum
+Requires-Dist: evaluate
+Requires-Dist: janus
+Provides-Extra: devel
+Requires-Dist: datasets ; extra == 'devel'
+Requires-Dist: einops ; extra == 'devel'
+Requires-Dist: evaluate ; extra == 'devel'
+Requires-Dist: graphviz ; extra == 'devel'
+Requires-Dist: mypy ; extra == 'devel'
+Requires-Dist: parameterized ; extra == 'devel'
+Requires-Dist: pre-commit ; extra == 'devel'
+Requires-Dist: pybind11-stubgen ; extra == 'devel'
+Requires-Dist: pytest-cov ; extra == 'devel'
+Requires-Dist: pytest-forked ; extra == 'devel'
+Requires-Dist: pytest-xdist ; extra == 'devel'
+Requires-Dist: rouge-score ; extra == 'devel'
+Requires-Dist: typing-extensions ==4.8.0 ; extra == 'devel'
+
+TensorRT-LLM: A TensorRT Toolbox for Large Language Models

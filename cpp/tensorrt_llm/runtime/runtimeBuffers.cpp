@@ -17,13 +17,13 @@
 #include "tensorrt_llm/runtime/runtimeBuffers.h"
 
 #include "tensorrt_llm/batch_manager/kvCacheManager.h"
-#include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/stlUtils.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
 #include "tensorrt_llm/runtime/utils/sessionUtils.h"
 
 #include <algorithm>
+#include <iostream>
 
 using namespace tensorrt_llm::runtime;
 namespace tc = tensorrt_llm::common;
@@ -32,7 +32,7 @@ RuntimeBuffers::GenerationConfig RuntimeBuffers::GenerationConfig::fromInput(ITe
     ITensor const& inputLengthsHost, bool const inputPacked, SizeType const beamWidth,
     SizeType const maxAttentionWindow, SizeType const sinkTokenLength, SizeType const maxSequenceLength)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     auto const batchSize = static_cast<SizeType>(inputLengthsHost.getSize());
 
     auto const* inputLengthsPtr = bufferCast<SizeType>(inputLengthsHost);
@@ -71,14 +71,14 @@ RuntimeBuffers::GenerationConfig RuntimeBuffers::GenerationConfig::fromInput(ITe
         "Max input length is equal to or larger that maxSequenceLength given in setup. No new tokens can be "
         "generated.");
 
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
     return GenerationConfig{
         batchSize, beamWidth, maxInputLength, maxAttentionWindow, sinkTokenLength, maxSequenceLength, inputLengthSum};
 }
 
 void RuntimeBuffers::clear()
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     contextLengthsHost = nullptr;
     contextLengthsDevice = nullptr;
 
@@ -104,22 +104,22 @@ void RuntimeBuffers::clear()
     hiddenStates = nullptr;
 
     allocated = false;
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::clearTensorMaps()
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     for (auto& buffer : inputBuffers)
         buffer.clear();
     for (auto& buffer : outputBuffers)
         buffer.clear();
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::create(TllmRuntime& runtime, GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     auto& manager = runtime.getBufferManager();
     auto& engine = runtime.getEngine();
 
@@ -127,15 +127,20 @@ void RuntimeBuffers::create(TllmRuntime& runtime, GptModelConfig const& modelCon
     {
         auto const logitsType = engine.getTensorDataType("logits");
         logits = manager.emptyTensor(MemoryType::kGPU, logitsType);
-        originalLogitsPtr = logits;
 
-        allGenerationLogits = manager.emptyTensor(MemoryType::kGPU, logitsType);
         if (modelConfig.computeGenerationLogits())
         {
+            allGenerationLogits = manager.emptyTensor(MemoryType::kGPU, logitsType);
+            cacheGenerationLogits = manager.emptyTensor(MemoryType::kGPU, logitsType);
+            cacheGenerationLogitsHost = manager.emptyTensor(MemoryType::kPINNED, logitsType);
+
             cacheGenerationFragmentPointerDevice = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT64);
             cacheGenerationFragmentPointerHost = manager.emptyTensor(MemoryType::kPINNED, nvinfer1::DataType::kINT64);
-
-            generationLogitsFragments = std::make_shared<std::vector<TensorPtr>>();
+        }
+        if (modelConfig.computeContextLogits())
+        {
+            cacheContextLogits = manager.emptyTensor(MemoryType::kGPU, logitsType);
+            cacheContextLogitsHost = manager.emptyTensor(MemoryType::kPINNED, logitsType);
         }
     }
 
@@ -170,7 +175,8 @@ void RuntimeBuffers::create(TllmRuntime& runtime, GptModelConfig const& modelCon
 
     if (modelConfig.usePagedKvCache())
     {
-        auto const kvCacheBlockPointersType = engine.getTensorDataType("kv_cache_block_pointers");
+        auto const kvCacheBlockPointersType
+            = engine.getTensorDataType(("kv_cache_block_pointers_" + std::to_string(firstLayerId)).c_str());
         kvCacheBlockPointersHost = manager.emptyTensor(MemoryType::kCPU, kvCacheBlockPointersType);
         kvCacheBlockPointersDevice = manager.emptyTensor(MemoryType::kGPU, kvCacheBlockPointersType);
     }
@@ -182,7 +188,8 @@ void RuntimeBuffers::create(TllmRuntime& runtime, GptModelConfig const& modelCon
     if (modelConfig.useGptAttentionPlugin())
     {
         pastKeyValueLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
-        maxAttentionWindows = BufferManager::cpu(ITensor::makeShape({localNbLayers}), nvinfer1::DataType::kINT32);
+        maxAttentionWindows
+            = utils::createBufferVector(runtime, localNbLayers, MemoryType::kCPU, nvinfer1::DataType::kINT32);
         sinkTokenLengths = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
     }
     else
@@ -205,7 +212,7 @@ void RuntimeBuffers::create(TllmRuntime& runtime, GptModelConfig const& modelCon
         hiddenStates = manager.emptyTensor(MemoryType::kGPU, modelConfig.getDataType());
     }
 
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::initFromInput(ITensor const& inputIds, TensorPtr const& inputLengths, bool inputPacked,
@@ -221,64 +228,58 @@ void RuntimeBuffers::initFromInput(ITensor const& inputIds, TensorPtr const& inp
         inputIds, *contextLengthsHost, inputPacked, beamWidth, maxAttentionWindow, sinkTokenLength, maxSequenceLength);
 }
 
-void RuntimeBuffers::reshape(
-    KvCacheManager const* kvCacheManager, GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
+void RuntimeBuffers::reshape(GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 
     auto const batchSize = generationConfig.batchSize;
     auto const beamWidth = generationConfig.beamWidth;
     auto const maxInputLength = generationConfig.maxInputLength;
     auto const maxAttentionWindow = generationConfig.maxAttentionWindow;
+    auto const sinkTokenLen = generationConfig.sinkTokenLength;
     auto const maxSeqLength = generationConfig.maxSeqLength;
     auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
 
     if (worldConfig.isLastPipelineParallelRank())
     {
-        if (modelConfig.computeContextLogits())
+        if (!modelConfig.computeContextLogits())
         {
-            if (!modelConfig.computeGenerationLogits())
-            {
-                // If only enable computeContextLogits, also need to have a generation buffer to store the last token of
-                // context
-                allGenerationLogits->reshape(ITensor::makeShape({1, batchSize, beamWidth, vocabSizePadded}));
-            }
-        }
-        else
-        {
-            // If only gather generation logits
-            if (modelConfig.computeGenerationLogits())
-            {
-                logits = originalLogitsPtr; // logits point to original buffer
-            }
             logits->reshape(ITensor::makeShape({batchSize, 1, vocabSizePadded}));
         }
 
         if (modelConfig.computeGenerationLogits())
         {
             allGenerationLogits->reshape(
-                ITensor::makeShape({(maxSeqLength - maxInputLength), batchSize, beamWidth, vocabSizePadded}));
+                ITensor::makeShape({(generationConfig.maxSeqLength - generationConfig.maxInputLength), batchSize,
+                    beamWidth, vocabSizePadded}));
 
             cacheGenerationFragmentPointerDevice->reshape(
-                ITensor::makeShape({batchSize, (maxSeqLength - maxInputLength)}));
+                ITensor::makeShape({batchSize, (generationConfig.maxSeqLength - generationConfig.maxInputLength)}));
             cacheGenerationFragmentPointerHost->reshape(
-                ITensor::makeShape({batchSize, (maxSeqLength - maxInputLength)}));
+                ITensor::makeShape({batchSize, (generationConfig.maxSeqLength - generationConfig.maxInputLength)}));
         }
     }
 
     lastTokenIds->reshape(ITensor::makeShape({batchSize}));
 
     auto kvCacheReserve = ITensor::makeShape(
-        {batchSize, 2, modelConfig.getNbKvHeads(), maxAttentionWindow, modelConfig.getSizePerHead()});
+        {batchSize, 2, modelConfig.getNbKvHeads() , maxAttentionWindow, modelConfig.getSizePerHead()});
     auto kvCacheShape
         = ITensor::makeShape({batchSize, 2, modelConfig.getNbKvHeads(), maxInputLength, modelConfig.getSizePerHead()});
     if (modelConfig.usePagedKvCache())
     {
-        TLLM_CHECK(kvCacheManager);
-
         auto const localNbLayers = modelConfig.getNbLayers(worldConfig.getPipelineParallelism());
+        auto const tokensPerBlock = modelConfig.getTokensPerBlock();
+        SizeType bubbleLen
+            = (sinkTokenLen % tokensPerBlock == 0) ? 0 : tokensPerBlock - (sinkTokenLen % tokensPerBlock);
+        auto maxBlocksPerSeq = tc::ceilDiv(maxAttentionWindow + bubbleLen, tokensPerBlock);
+        // If beamWidth > 1, use one more block for each sequence in the paged kv cache to avoid dropping the needed
+        // tokens, when enabling cyclic kv cache.
+        if (beamWidth > 1 && maxSeqLength > maxAttentionWindow)
+        {
+            maxBlocksPerSeq += 1;
+        }
 
-        auto const maxBlocksPerSeq = kvCacheManager->getMaxBlocksPerSeq();
         // reserve batchSize * beamWidth and resize to batchSize
         auto cacheBlockPointersShape = ITensor::makeShape({localNbLayers, batchSize * beamWidth, 2, maxBlocksPerSeq});
         kvCacheBlockPointersHost->reshape(cacheBlockPointersShape);
@@ -292,13 +293,11 @@ void RuntimeBuffers::reshape(
         utils::reshapeBufferVector(presentKeysVals, kvCacheReserve);
     }
 
-    auto const localNbLayers = modelConfig.getNbLayers(worldConfig.getPipelineParallelism());
-
     if (modelConfig.useGptAttentionPlugin())
     {
         pastKeyValueLengths->reshape(ITensor::makeShape({batchSize}));
         requestTypes->reshape(ITensor::makeShape({batchSize}));
-        maxAttentionWindows->reshape(ITensor::makeShape({localNbLayers}));
+        utils::reshapeBufferVector(maxAttentionWindows, ITensor::makeShape({1}));
         sinkTokenLengths->reshape(ITensor::makeShape({1}));
     }
     else
@@ -324,7 +323,7 @@ void RuntimeBuffers::reshape(
     }
 
     allocated = true;
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::reset(BufferManager& manager)
@@ -337,7 +336,7 @@ void RuntimeBuffers::reset(BufferManager& manager)
 std::vector<RuntimeBuffers> RuntimeBuffers::split(
     SizeType contextBatchSize, GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 
     std::vector<RuntimeBuffers> bufferSlices;
     auto const generationBatchSize = generationConfig.batchSize;
@@ -424,20 +423,21 @@ std::vector<RuntimeBuffers> RuntimeBuffers::split(
         }
     }
 
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
     return bufferSlices;
 }
 
 void RuntimeBuffers::gatherLastTokenLogits(
     BufferManager& manager, GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     TLLM_CHECK_WITH_INFO(modelConfig.computeContextLogits(),
         "Gather last token logits is only necessary when context logits are computed");
 
     if (worldConfig.isLastPipelineParallelRank())
     {
         auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
+
         TensorPtr tiledTensor = ITensor::slice(allGenerationLogits, 0, 1);
         tiledTensor->squeeze(0);
         kernels::gatherLastTokenLogits(*tiledTensor, *logits, *lastTokenIds, manager.getStream());
@@ -451,12 +451,12 @@ void RuntimeBuffers::gatherLastTokenLogits(
         }
     }
 
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::copyAttentionMasks(std::vector<RuntimeBuffers> const& contextBatches, BufferManager& manager)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     auto const batchSize = generationConfig.batchSize;
     auto const maxInputLength = generationConfig.maxInputLength;
 
@@ -473,12 +473,12 @@ void RuntimeBuffers::copyAttentionMasks(std::vector<RuntimeBuffers> const& conte
         manager.copy(*buffers.attentionMask, *attentionMaskSlice);
         offset += contextBatchSize;
     }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::tile(BufferManager& manager, GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     auto const beamWidth = generationConfig.beamWidth;
     TLLM_CHECK_WITH_INFO(beamWidth > 1, "Tiling is only necessary for beam search.");
 
@@ -511,13 +511,13 @@ void RuntimeBuffers::tile(BufferManager& manager, GptModelConfig const& modelCon
         for (auto& buffer : presentKeysValsAlt)
             utils::tileBufferReplace(buffer, beamWidth, manager);
     }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::postContextStep(std::vector<RuntimeBuffers> const& contextBuffers, BufferManager& manager,
     GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     auto const batchSize = generationConfig.batchSize;
     auto const beamWidth = generationConfig.beamWidth;
 
@@ -572,14 +572,14 @@ void RuntimeBuffers::postContextStep(std::vector<RuntimeBuffers> const& contextB
             manager, modelConfig.usePackedInput());
     }
 
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 void RuntimeBuffers::prepareContextStep(TensorPtr const& inputIds, TokenIdType const padId, BufferManager& manager,
-    batch_manager::kv_cache_manager::KVCacheManager const* kvCacheManager, SizeType firstBatchSlotIdx,
-    GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
+    KvCacheManager const* kvCacheManager, SizeType firstBatchSlotIdx, GptModelConfig const& modelConfig,
+    WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     auto& stream = manager.getStream();
     SizeType const batchSize = generationConfig.batchSize;
     SizeType const maxInputLength = generationConfig.maxInputLength;
@@ -599,9 +599,11 @@ void RuntimeBuffers::prepareContextStep(TensorPtr const& inputIds, TokenIdType c
         TLLM_CHECK(requestTypes->getSize() == static_cast<std::size_t>(batchSize));
         std::fill_n(RequestTypesPtr, batchSize, 0);
 
-        auto maxAttentionWindowsPtr = bufferCast<SizeType>(*maxAttentionWindows);
-        std::fill_n(maxAttentionWindowsPtr, localNbLayers, generationConfig.maxAttentionWindow);
-
+        // Set maxAttentionWindows buffer and sinkTokenLengths to the same value currently.
+        for (auto layer = 0; layer < localNbLayers; ++layer)
+        {
+            bufferCast<SizeType>(*maxAttentionWindows[layer])[0] = generationConfig.maxAttentionWindow;
+        }
         bufferCast<SizeType>(*sinkTokenLengths)[0] = generationConfig.sinkTokenLength;
 
         auto const& inputShape = inputIds->getShape();
@@ -710,14 +712,14 @@ void RuntimeBuffers::prepareContextStep(TensorPtr const& inputIds, TokenIdType c
         manager.copy(*contextLengthsDevice, *lastTokenIds);
     }
 
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 RuntimeBuffers::TensorPtr RuntimeBuffers::prepareNextStep(SizeType const step, BufferManager& manager,
-    batch_manager::kv_cache_manager::KVCacheManager* kvCacheManager, SizeType firstBatchSlotIdx,
-    GptModelConfig const& modelConfig, WorldConfig const& worldConfig)
+    KvCacheManager* kvCacheManager, SizeType firstBatchSlotIdx, GptModelConfig const& modelConfig,
+    WorldConfig const& worldConfig)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     auto& stream = manager.getStream();
     SizeType const batchSize = generationConfig.batchSize;
     SizeType const beamWidth = generationConfig.beamWidth;
@@ -832,7 +834,7 @@ RuntimeBuffers::TensorPtr RuntimeBuffers::prepareNextStep(SizeType const step, B
     {
         kernels::invokeInclusiveSum(*lastTokenIds, *lastTokenIds, manager, stream);
     }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
     return nextInputIds;
 }
 
@@ -840,7 +842,7 @@ void RuntimeBuffers::getRuntimeBuffers(TensorMap& inputBuffers, TensorMap& outpu
     TensorPtr const& inputIds, TensorPtr const& commPtrs, GptModelConfig const& modelConfig,
     WorldConfig const& worldConfig) const
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     inputBuffers.clear();
     outputBuffers.clear();
 
@@ -872,7 +874,6 @@ void RuntimeBuffers::getRuntimeBuffers(TensorMap& inputBuffers, TensorMap& outpu
 
     auto const localNbLayers = modelConfig.getNbLayers(worldConfig.getPipelineParallelism());
     auto const firstLayerId = worldConfig.getPipelineParallelRank() * localNbLayers;
-
     if (modelConfig.useGptAttentionPlugin())
     {
         inputBuffers.insert_or_assign("cache_indirection", cacheIndirectionDecoderOutput);
@@ -880,7 +881,7 @@ void RuntimeBuffers::getRuntimeBuffers(TensorMap& inputBuffers, TensorMap& outpu
         inputBuffers.insert_or_assign("host_request_types", requestTypes);
         inputBuffers.insert_or_assign("sequence_length", sequenceLengths);
         inputBuffers.insert_or_assign("host_sink_token_length", sinkTokenLengths);
-        inputBuffers.insert_or_assign("host_max_attention_window_sizes", maxAttentionWindows);
+        utils::insertTensorVector(inputBuffers, "host_max_attention_window_size_", maxAttentionWindows, firstLayerId);
 
         if (modelConfig.usePackedInput())
         {
@@ -888,8 +889,10 @@ void RuntimeBuffers::getRuntimeBuffers(TensorMap& inputBuffers, TensorMap& outpu
         }
         if (modelConfig.usePagedKvCache())
         {
-            inputBuffers.insert_or_assign("kv_cache_block_pointers", kvCacheBlockPointersDevice);
-            inputBuffers.insert_or_assign("host_kv_cache_block_pointers", kvCacheBlockPointersHost);
+            utils::insertTensorSlices(
+                inputBuffers, "kv_cache_block_pointers_", kvCacheBlockPointersDevice, firstLayerId);
+            utils::insertTensorSlices(
+                inputBuffers, "host_kv_cache_block_pointers_", kvCacheBlockPointersHost, firstLayerId);
         }
         else
         {
@@ -934,10 +937,7 @@ void RuntimeBuffers::getRuntimeBuffers(TensorMap& inputBuffers, TensorMap& outpu
         inputBuffers.insert_or_assign("tasks", promptTuningParams.tasks);
         inputBuffers.insert_or_assign("prompt_vocab_size", promptTuningParams.vocabSize);
     }
-
-    // utils::printTensorMap(std::cerr, inputBuffers);
-    // utils::printTensorMap(std::cerr, outputBuffers);
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 std::vector<SizeType> RuntimeBuffers::getPositionIdsContextPhaseGlm(const SizeType& batchSize,

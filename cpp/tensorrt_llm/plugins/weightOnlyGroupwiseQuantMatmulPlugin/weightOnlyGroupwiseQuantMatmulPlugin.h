@@ -27,7 +27,6 @@
 #include <cutlass/numeric_types.h>
 
 #include <cassert>
-#include <cuda_runtime.h>
 #include <memory>
 #include <set>
 #include <string>
@@ -140,7 +139,6 @@ private:
     int mScalesInputIdx;
     int mZerosInputIdx;
     int mBiasesInputIdx;
-    int mAlphaInputIdx;
 
     GemmDims mDims{};
     GemmIdCore mGemmId{};

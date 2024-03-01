@@ -1,0 +1,1 @@
+python build.py --use_custom_all_reduce --world_size 2 --tp_size 2 --output_dir /workspace/models/trt_engines/llama-2-7b/fp16/2-gpu-test2/ --model_dir Llama-2-7b-hf/ --remove_input_padding --dtype float16  --use_gemm_plugin float16

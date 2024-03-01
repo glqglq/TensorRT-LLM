@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "tensorrt_llm/common/quantization.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/gptModelConfig.h"
 #include "tensorrt_llm/runtime/worldConfig.h"

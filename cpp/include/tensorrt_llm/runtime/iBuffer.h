@@ -16,9 +16,6 @@
 
 #pragma once
 
-#include "tensorrt_llm/common/arrayView.h"
-#include "tensorrt_llm/common/dataType.h"
-
 #include <NvInferRuntime.h>
 
 #include <cstdint>
@@ -31,9 +28,12 @@
 #include <cuda_fp16.h>
 #include <memory>
 #include <ostream>
+#include <stdexcept>
 #include <type_traits>
 #include <typeinfo>
 #include <vector>
+
+#include "tensorrt_llm/common/dataType.h"
 
 namespace tensorrt_llm::runtime
 {
@@ -42,8 +42,7 @@ enum class MemoryType : std::int32_t
 {
     kGPU = 0,
     kCPU = 1,
-    kPINNED = 2,
-    kUVM = 3
+    kPINNED = 2
 };
 
 template <MemoryType T>
@@ -67,12 +66,6 @@ template <>
 struct MemoryTypeString<MemoryType::kPINNED>
 {
     static auto constexpr value = "PINNED";
-};
-
-template <>
-struct MemoryTypeString<MemoryType::kUVM>
-{
-    static auto constexpr value = "UVM";
 };
 
 //! \brief For converting a TensorRT data type to a C++ data type.
@@ -561,21 +554,82 @@ T* bufferCast(IBuffer& buffer)
 }
 
 template <typename T>
-class BufferRange : public tensorrt_llm::common::ArrayView<T>
+class BufferRange
 {
 public:
-    using Base = tensorrt_llm::common::ArrayView<T>;
-    using typename Base::size_type;
-
-    BufferRange(T* data, size_type size)
-        : Base{data, size}
-    {
-    }
+    using value_type = T;
+    using size_type = std::size_t;
+    using reference = value_type&;
+    using const_reference = value_type const&;
+    using pointer = T*;
+    using const_pointer = T const*;
+    using iterator = pointer;
+    using const_iterator = const_pointer;
 
     explicit BufferRange(IBuffer& buffer)
-        : BufferRange(bufferCast<T>(buffer), buffer.getSize())
+        : mData(bufferCast<T>(buffer))
+        , mSize(buffer.getSize())
     {
     }
+
+    iterator begin()
+    {
+        return mData;
+    }
+
+    iterator end()
+    {
+        return mData + mSize;
+    }
+
+    const_iterator begin() const
+    {
+        return mData;
+    }
+
+    const_iterator end() const
+    {
+        return mData + mSize;
+    }
+
+    const_iterator cbegin()
+    {
+        return mData;
+    }
+
+    const_iterator cend()
+    {
+        return mData + mSize;
+    }
+
+    const_iterator cbegin() const
+    {
+        return mData;
+    }
+
+    const_iterator cend() const
+    {
+        return mData + mSize;
+    }
+
+    [[nodiscard]] size_type size() const
+    {
+        return mSize;
+    }
+
+    reference operator[](size_type index)
+    {
+        return mData[index];
+    }
+
+    const_reference operator[](size_type index) const
+    {
+        return mData[index];
+    }
+
+private:
+    T* mData;
+    size_type mSize;
 };
 
 //! \brief Utility function to print a buffer.

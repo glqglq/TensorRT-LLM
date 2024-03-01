@@ -17,14 +17,15 @@
 #pragma once
 
 #include "tensorrt_llm/runtime/cudaStream.h"
-#include "tensorrt_llm/runtime/decodingMode.h"
 #include "tensorrt_llm/runtime/generationInput.h"
 #include "tensorrt_llm/runtime/generationOutput.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/samplingConfig.h"
 
+#include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <NvInferRuntime.h>
 
@@ -73,9 +74,8 @@ public:
     using TensorPtr = std::shared_ptr<ITensor>;
 
     //! Setup the decoder before calling `forward()`, also calls reshapeBuffers
-    virtual void setup(DecodingMode const& mode, SizeType maxBatchSize, SizeType maxBeamWidth,
-        SizeType maxAttentionWindow, SizeType sinkTokenLength, SizeType maxSequenceLength, SizeType maxTokensPerStep,
-        bool fusedDecoder, nvinfer1::DataType dtype)
+    virtual void setup(SizeType maxBatchSize, SizeType maxBeamWidth, SizeType maxAttentionWindow,
+        SizeType sinkTokenLength, SizeType maxSequenceLength, SizeType maxTokensPerStep, nvinfer1::DataType dtype)
         = 0;
 
     //! @brief Initialize the decoder with new batch of inputs.
@@ -100,25 +100,25 @@ public:
     virtual void finalize() const = 0;
 
     //! @returns [batchSize, beamWidth, maxSequenceLength], all token ids, on gpu
-    [[nodiscard]] virtual TensorPtr getOutputIds() const = 0;
+    virtual TensorPtr getOutputIds() const = 0;
 
     //! @returns [batchSize, maxBeamWidth], cumulative log probabilities (per beam), on gpu
-    [[nodiscard]] virtual TensorPtr getCumLogProbs() const = 0;
+    virtual TensorPtr getCumLogProbs() const = 0;
 
     //! @returns [batchSize, maxBeamWidth, maxSequenceLength], log probabilities (per beam), on gpu
-    [[nodiscard]] virtual TensorPtr getLogProbs() const = 0;
+    virtual TensorPtr getLogProbs() const = 0;
 
     //! @brief Get tokens generated in one step of last forward pass
     //! @param iter The iteration within [0; maxTokensPerStep) for which to get the tokens
     //! @returns [batchSize, beamWidth], tokens generated in `iter` (per beam), on gpu
-    [[nodiscard]] virtual TensorPtr getNewTokens(SizeType iter = 0) const = 0;
+    virtual TensorPtr getNewTokens(SizeType iter = 0) const = 0;
 
     //! @brief Get maxTokensPerStep tokens generated in the last forward pass
     //! @returns [maxTokensPerStep, batchSize, maxBeamWidth], tokens generated in last forward pass, on gpu
-    [[nodiscard]] virtual TensorPtr getAllNewTokens() const = 0;
+    virtual TensorPtr getAllNewTokens() const = 0;
 
     //! @returns [1], number of finished sequences, in pinned host memory
-    [[nodiscard]] virtual TensorPtr getNbFinished() const = 0;
+    virtual TensorPtr getNbFinished() const = 0;
 
     virtual ~IStatefulGptDecoder() = default;
 

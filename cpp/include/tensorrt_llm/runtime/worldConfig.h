@@ -112,6 +112,11 @@ public:
         std::optional<SizeType> tensorParallelism = std::nullopt,
         std::optional<SizeType> pipelineParallelism = std::nullopt,
         std::optional<std::vector<SizeType>> const& deviceIds = std::nullopt);
+    static WorldConfig twothread(SizeType gpusPerNode = kDefaultGpusPerNode,
+        std::optional<SizeType> tensorParallelism = std::nullopt,
+        std::optional<SizeType> pipelineParallelism = std::nullopt,
+        int rank = -1,
+        std::optional<std::vector<SizeType>> const& deviceIds = std::nullopt);
 
 private:
     SizeType mTensorParallelism;

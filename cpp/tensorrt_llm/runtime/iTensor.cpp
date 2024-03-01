@@ -20,7 +20,6 @@
 #include "tensorrt_llm/common/stringUtils.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/tensorView.h"
-#include "tensorrt_llm/runtime/tllmBuffers.h"
 
 #include <initializer_list>
 #include <memory>
@@ -89,12 +88,7 @@ ITensor::UniquePtr ITensor::wrap(void* data, nvinfer1::DataType type, nvinfer1::
             new GenericTensor<GpuBorrowingAllocator>(
                 shape, capacity, type, GpuBorrowingAllocator(data, capacityInBytes)));
         break;
-    case MemoryType::kUVM:
-        result.reset( // NOLINT(modernize-make-unique)
-            new GenericTensor<ManagedBorrowingAllocator>(
-                shape, capacity, type, ManagedBorrowingAllocator(data, capacityInBytes)));
-        break;
-    default: TLLM_THROW("Invalid memory type."); break;
+    default: TLLM_THROW("Unknown memory type");
     }
     return result;
 }

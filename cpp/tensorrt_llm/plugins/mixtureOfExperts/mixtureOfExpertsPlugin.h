@@ -22,6 +22,7 @@
 #include "tensorrt_llm/kernels/mixtureOfExperts/moe_kernels.h"
 #include "tensorrt_llm/plugins/common/plugin.h"
 #include <cassert>
+#include <mpi.h>
 #include <set>
 #include <string>
 #include <vector>

@@ -14,21 +14,23 @@
  * limitations under the License.
  */
 
-#include "tensorrt_llm/common/assert.h"
+#include "assert.h"
+
+bool CHECK_DEBUG_ENABLED = false;
 
 namespace
 {
 
-bool initCheckDebug()
+#if !defined(_MSC_VER)
+__attribute__((constructor))
+#endif
+void initOnLoad()
 {
     auto constexpr kDebugEnabled = "TRT_LLM_DEBUG_MODE";
     auto const debugEnabled = std::getenv(kDebugEnabled);
-    return debugEnabled && debugEnabled[0] == '1';
+    if (debugEnabled && debugEnabled[0] == '1')
+    {
+        CHECK_DEBUG_ENABLED = true;
+    }
 }
 } // namespace
-
-bool DebugConfig::isCheckDebugEnabled()
-{
-    static bool const debugEnabled = initCheckDebug();
-    return debugEnabled;
-}

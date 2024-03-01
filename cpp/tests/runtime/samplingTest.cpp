@@ -20,7 +20,10 @@
 #include <gtest/gtest.h>
 
 #include "tensorrt_llm/common/cudaAllocator.h"
+#include "tensorrt_llm/common/memoryUtils.h"
 #include "tensorrt_llm/common/tensor.h"
+#include "tensorrt_llm/common/tensorConversion.h"
+#include "tensorrt_llm/kernels/decodingKernels.h"
 #include "tensorrt_llm/layers/dynamicDecodeLayer.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/cudaStream.h"
@@ -56,6 +59,7 @@ typename tl::DynamicDecodeLayer<float>::OutputParams dynamicDecodeTest(BufferMan
     int localBatchSize, std::vector<int>& cpuOutputIds, std::vector<float> cpuLogits, int noRepeatNgramSizeValue = 0)
 {
     constexpr int endId = 1;
+    constexpr bool isFreeBufferAfterForward{false};
     cudaDeviceProp prop;
     tc::check_cuda_error(cudaGetDeviceProperties(&prop, 0));
 
@@ -92,17 +96,15 @@ typename tl::DynamicDecodeLayer<float>::OutputParams dynamicDecodeTest(BufferMan
     tc::Tensor newTokens{tc::MEMORY_GPU, tc::TYPE_INT32, {batchSize}, gpuNewTokens};
     tc::Tensor noRepeatNgramSize{tc::MEMORY_GPU, tc::TYPE_INT32, {batchSize}, gpuNoRepeatNgramSize};
 
-    auto const decodingMode = beamWidth == 1 ? DecodingMode::TopKTopP() : DecodingMode::BeamSearch();
     auto ddLayer = tl::DynamicDecodeLayer<float>(
-        decodingMode, batchSize, beamWidth, vocabSize, vocabSizePadded, manager.getStream().get(), allocator, &prop);
+        vocabSize, vocabSizePadded, manager.getStream().get(), allocator, isFreeBufferAfterForward, &prop);
 
     typename tl::DynamicDecodeLayer<float>::SetupParams setupParams;
 
-    ddLayer.setup(batchSize, beamWidth, nullptr, setupParams);
+    ddLayer.setup(batchSize, beamWidth, setupParams);
 
     typename tl::DynamicDecodeLayer<float>::ForwardParams forwardParams(
-        step, ite, maxInputLength, static_cast<int>(maxSeqLength), sinkTokenLength, localBatchSize, endIds);
-    forwardParams.logits = logits;
+        step, ite, maxInputLength, static_cast<int>(maxSeqLength), sinkTokenLength, localBatchSize, logits, endIds);
     forwardParams.no_repeat_ngram_size = noRepeatNgramSize;
 
     typename tl::DynamicDecodeLayer<float>::OutputParams outputParams(outputIds);

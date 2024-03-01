@@ -417,21 +417,6 @@ void invokeInclusiveSum(IBuffer& output, IBuffer const& input, BufferManager con
     cub::DeviceScan::InclusiveSum(tempStorageData, tempStorageBytes, inputData, outputData, size, stream.get());
 }
 
-void invokeInclusiveSum(IBuffer& output, IBuffer& tmpBuffer, IBuffer const& input, CudaStream const& stream)
-{
-    TLLM_CHECK_WITH_INFO(nvinfer1::DataType::kUINT8 == tmpBuffer.getDataType(), "tmpBuffer has wrong data type");
-
-    auto const size = input.getSize();
-    auto const* inputData = bufferCast<SizeType>(input);
-    auto* outputData = bufferCast<SizeType>(output);
-
-    std::size_t tempStorageBytes{0};
-    cub::DeviceScan::InclusiveSum(nullptr, tempStorageBytes, inputData, outputData, size, stream.get());
-    tmpBuffer.resize(tempStorageBytes);
-    auto* tmpBufferPtr = bufferCast<std::uint8_t>(tmpBuffer);
-    cub::DeviceScan::InclusiveSum(tmpBufferPtr, tempStorageBytes, inputData, outputData, size, stream.get());
-}
-
 namespace
 {
 __global__ void buildTokenMask(SizeType* tokenMask, SizeType const* inputLengths, SizeType const batchSize,
@@ -767,7 +752,7 @@ void initOutputIds(ITensor& outputIds, ITensor const& inputIds, ITensor const& i
     ITensor const& inputOffsets, TokenIdType const padId, TokenIdType const endId, SizeType const maxInputLength,
     bool const inputPacked, CudaStream const& stream)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     kernels::invokeFill(outputIds, endId, stream);
 
     if (inputPacked)
@@ -778,7 +763,7 @@ void initOutputIds(ITensor& outputIds, ITensor const& inputIds, ITensor const& i
     {
         kernels::invokeCopyInputToOutput(outputIds, inputIds, inputLengths, padId, stream);
     }
-    TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+    TLLM_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
 }
 
 namespace
@@ -801,34 +786,6 @@ __global__ void scatterTensor(T* output, T const* input, std::uint32_t const bat
             std::size_t constexpr beamIdx{0};
             auto const outputIdx = (batchIdx * beamWidth + beamIdx) * outputRowSize + columnIdx;
             output[outputIdx] = value;
-        }
-    }
-}
-
-template <typename T>
-__global__ void splitTransposed(T* output, T const* input, std::uint32_t const batchSize,
-    std::uint32_t const inputRowSize, std::uint32_t const split)
-{
-    auto const tidx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    auto const tidy = static_cast<std::size_t>(blockIdx.y) * blockDim.y + threadIdx.y;
-    auto const tidz = static_cast<std::size_t>(blockIdx.z) * blockDim.z + threadIdx.z;
-    auto const stridex = static_cast<std::size_t>(blockDim.x) * gridDim.x;
-    auto const stridey = static_cast<std::size_t>(blockDim.y) * gridDim.y;
-    auto const stridez = static_cast<std::size_t>(blockDim.z) * gridDim.z;
-
-    auto const splitRowSize = static_cast<std::size_t>(inputRowSize / split);
-    for (auto pIdx = tidz; pIdx < split; pIdx += stridez)
-    {
-        for (auto bid = tidx; bid < batchSize; bid += stridex)
-        {
-            for (auto colIdx = tidy; colIdx < splitRowSize; colIdx += stridey)
-            {
-                auto outputIdx
-                    = common::flat_index3(pIdx, bid, colIdx, static_cast<std::size_t>(batchSize), splitRowSize);
-                auto inputIdx
-                    = common::flat_index2(bid, colIdx + pIdx * splitRowSize, static_cast<std::size_t>(inputRowSize));
-                output[outputIdx] = input[inputIdx];
-            }
         }
     }
 }
@@ -915,53 +872,7 @@ void scatterTensor(ITensor& output, ITensor const& input, SizeType beamWidth, Cu
     case nvinfer1::DataType::kFLOAT: invokeScatterTensor<float>(output, input, beamWidth, stream); break;
     case nvinfer1::DataType::kHALF: invokeScatterTensor<half>(output, input, beamWidth, stream); break;
     case nvinfer1::DataType::kINT8: invokeScatterTensor<int8_t>(output, input, beamWidth, stream); break;
-#ifdef ENABLE_FP8
     case nvinfer1::DataType::kFP8: invokeScatterTensor<__nv_fp8_e4m3>(output, input, beamWidth, stream); break;
-#endif // ENABLE_FP8
-    default: TLLM_CHECK_WITH_INFO(false, "data type not supported");
-    }
-}
-
-template <typename T>
-void invokeSplitTransposed(ITensor& output, ITensor const& input, SizeType split, CudaStream const& stream)
-{
-    auto const& inputShape = input.getShape();
-    auto const nbInputRows = static_cast<std::uint32_t>(inputShape.d[0]);
-    auto const inputRowSize = input.getSize() / static_cast<std::size_t>(nbInputRows);
-    auto const& outputShape = output.getShape();
-    auto const nbOutputRows = static_cast<std::uint32_t>(outputShape.d[0]);
-    auto const outputRowSize = output.getSize() / static_cast<std::size_t>(nbOutputRows);
-    auto const inputNbElems = input.getSize();
-    auto const outputNbElems = output.getSize();
-
-    TLLM_CHECK_WITH_INFO(
-        nbOutputRows == split, common::fmtstr("nbOutputRows (%d) must be split (%d)", nbOutputRows, split));
-    TLLM_CHECK_WITH_INFO(
-        inputNbElems == outputNbElems, common::fmtstr("input and output must have the same number of elements"));
-
-    dim3 const blockSize{256, 1, 1};
-    std::size_t const gridx{tc::ceilDiv(nbInputRows, blockSize.x)};
-    std::size_t const gridMax{std::numeric_limits<std::uint32_t>::max()};
-    dim3 const gridSize{
-        static_cast<std::uint32_t>(std::min(gridx, gridMax)), static_cast<std::uint32_t>(inputRowSize), 1};
-    splitTransposed<<<gridSize, blockSize, 0, stream.get()>>>(
-        bufferCast<T>(output), bufferCast<T const>(input), nbInputRows, inputRowSize, static_cast<uint32_t>(split));
-}
-
-void splitTransposed(ITensor& output, ITensor const& input, SizeType split, CudaStream const& stream)
-{
-    switch (input.getDataType())
-    {
-    case nvinfer1::DataType::kINT32: invokeSplitTransposed<SizeType>(output, input, split, stream); break;
-    case nvinfer1::DataType::kFLOAT: invokeSplitTransposed<float>(output, input, split, stream); break;
-    case nvinfer1::DataType::kHALF: invokeSplitTransposed<half>(output, input, split, stream); break;
-    case nvinfer1::DataType::kINT8: invokeSplitTransposed<int8_t>(output, input, split, stream); break;
-#ifdef ENABLE_FP8
-    case nvinfer1::DataType::kFP8: invokeSplitTransposed<__nv_fp8_e4m3>(output, input, split, stream); break;
-#endif // ENABLE_FP8
-#ifdef ENABLE_BF16
-    case nvinfer1::DataType::kBF16: invokeSplitTransposed<__nv_bfloat16>(output, input, split, stream); break;
-#endif // ENABLE_BF16
     default: TLLM_CHECK_WITH_INFO(false, "data type not supported");
     }
 }
@@ -997,13 +908,9 @@ void tileTensor(ITensor& output, ITensor const& input, SizeType beamWidth, CudaS
     case nvinfer1::DataType::kINT32: invokeTileTensor<SizeType>(output, input, beamWidth, stream); break;
     case nvinfer1::DataType::kFLOAT: invokeTileTensor<float>(output, input, beamWidth, stream); break;
     case nvinfer1::DataType::kHALF: invokeTileTensor<half>(output, input, beamWidth, stream); break;
-#ifdef ENABLE_BF16
     case nvinfer1::DataType::kBF16: invokeTileTensor<__nv_bfloat16>(output, input, beamWidth, stream); break;
-#endif // ENABLE_BF16
     case nvinfer1::DataType::kINT8: invokeTileTensor<int8_t>(output, input, beamWidth, stream); break;
-#ifdef ENABLE_FP8
     case nvinfer1::DataType::kFP8: invokeTileTensor<__nv_fp8_e4m3>(output, input, beamWidth, stream); break;
-#endif // ENABLE_FP8
     default: TLLM_CHECK_WITH_INFO(false, "data type not supported");
     }
 }
@@ -1032,9 +939,7 @@ void tileTensorInplace(ITensor& tensor, SizeType beamWidth, CudaStream const& st
     case nvinfer1::DataType::kFLOAT: invokeTileTensorInPlace<float>(tensor, beamWidth, stream); break;
     case nvinfer1::DataType::kHALF: invokeTileTensorInPlace<half>(tensor, beamWidth, stream); break;
     case nvinfer1::DataType::kINT8: invokeTileTensorInPlace<int8_t>(tensor, beamWidth, stream); break;
-#ifdef ENABLE_FP8
     case nvinfer1::DataType::kFP8: invokeTileTensorInPlace<__nv_fp8_e4m3>(tensor, beamWidth, stream); break;
-#endif // ENABLE_FP8
     default: TLLM_CHECK_WITH_INFO(false, "data type not supported");
     }
 }
@@ -1100,16 +1005,12 @@ void gatherLastTokenLogits(ITensor& output, ITensor const& input, ITensor const&
     {
     case nvinfer1::DataType::kFLOAT: invokeGatherLastTokenLogits<float>(output, input, lastTokenIds, stream); break;
     case nvinfer1::DataType::kHALF: invokeGatherLastTokenLogits<half>(output, input, lastTokenIds, stream); break;
-#ifdef ENABLE_BF16
     case nvinfer1::DataType::kBF16:
         invokeGatherLastTokenLogits<__nv_bfloat16>(output, input, lastTokenIds, stream);
         break;
-#endif // ENABLE_BF16
-#ifdef ENABLE_FP8
     case nvinfer1::DataType::kFP8:
         invokeGatherLastTokenLogits<__nv_fp8_e4m3>(output, input, lastTokenIds, stream);
         break;
-#endif // ENABLE_FP8
     default: TLLM_CHECK_WITH_INFO(false, "data type not supported");
     }
 }
@@ -1198,18 +1099,14 @@ void mergeLogitsFragments(BufferManager const& bufferManager, ITensor& output, s
         invokeMergeLogitsFragments<half>(bufferManager, output, fragmentsVector, cachePointerDevice, cachePointerHost,
             firstBatchSlotIdx, microBatchSize, beamWidth, stream, stepOffset);
         break;
-#ifdef ENABLE_BF16
     case nvinfer1::DataType::kBF16:
         invokeMergeLogitsFragments<__nv_bfloat16>(bufferManager, output, fragmentsVector, cachePointerDevice,
             cachePointerHost, firstBatchSlotIdx, microBatchSize, beamWidth, stream, stepOffset);
         break;
-#endif // ENABLE_BF16
-#ifdef ENABLE_FP8
     case nvinfer1::DataType::kFP8:
         invokeMergeLogitsFragments<__nv_fp8_e4m3>(bufferManager, output, fragmentsVector, cachePointerDevice,
             cachePointerHost, firstBatchSlotIdx, microBatchSize, beamWidth, stream, stepOffset);
         break;
-#endif // ENABLE_FP8
     default: TLLM_CHECK_WITH_INFO(false, "data type not supported");
     }
 }

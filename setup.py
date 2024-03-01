@@ -94,10 +94,9 @@ setup(
     keywords="nvidia tensorrt deeplearning inference",
     package_data={
         'tensorrt_llm': ([
-            'libs/th_common.dll', 'libs/tensorrt_llm.dll',
-            'libs/nvinfer_plugin_tensorrt_llm.dll', 'bindings.*.pyd'
+            'libs/th_common.dll', 'libs/nvinfer_plugin_tensorrt_llm.dll',
+            'bindings.*.pyd'
         ] if on_windows else [
-            'libs/libtensorrt_llm.so',
             'libs/libth_common.so',
             'libs/libnvinfer_plugin_tensorrt_llm.so',
             'bindings.*.so',
@@ -106,13 +105,7 @@ setup(
     entry_points={
         'console_scripts': ['trtllm-build=tensorrt_llm.commands.build:main'],
     },
-    extras_require={
-        "devel": devel_deps,
-        "benchmarking": [
-            "click",
-            "pydantic",
-        ]
-    },
+    extras_require={"devel": devel_deps},
     zip_safe=True,
     install_requires=required_deps,
     dependency_links=

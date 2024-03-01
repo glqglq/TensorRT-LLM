@@ -19,10 +19,7 @@
 #include "tensorrt_llm/common/mpiUtils.h"
 #include "tensorrt_llm/runtime/bufferManager.h"
 
-#if ENABLE_MULTI_DEVICE
-#include "tensorrt_llm/plugins/common/plugin.h"
 #include <nccl.h>
-#endif // ENABLE_MULTI_DEVICE
 
 #include <algorithm>
 
@@ -64,7 +61,6 @@ TEST(MPIUtils, Broadcast)
     testBroadcast<std::uint64_t>();
 }
 
-#if ENABLE_MULTI_DEVICE
 TEST(MPIUtils, BroadcastNcclId)
 {
     auto& comm = mpi::MpiComm::world();
@@ -83,12 +79,6 @@ TEST(MPIUtils, BroadcastNcclId)
     EXPECT_TRUE(std::any_of(
         id.internal, id.internal + sizeof(id.internal) / sizeof(id.internal[0]), [](auto x) { return x != 0; }));
 }
-
-TEST(MPIUtils, GlobalSessionHandle)
-{
-    EXPECT_EQ(tensorrt_llm::plugins::getCommSessionHandle(), &COMM_SESSION);
-}
-#endif // ENABLE_MULTI_DEVICE
 
 template <typename T>
 void testBroadcastBuffer()
@@ -154,52 +144,6 @@ TEST(MPIUtils, SendRecv)
     testSendRecv<std::uint32_t>();
     testSendRecv<std::int64_t>();
     testSendRecv<std::uint64_t>();
-}
-
-template <typename T>
-void testSendMRecv()
-{
-    auto& comm = mpi::MpiComm::world();
-    auto const rank = comm.getRank();
-    auto constexpr expectedValue = static_cast<T>(42);
-    auto constexpr tag = 0;
-    if (rank == 0)
-    {
-        comm.send(expectedValue, 1, tag);
-    }
-    else if (rank == 1)
-    {
-        MPI_Message msg;
-        MPI_Status status;
-        comm.mprobe(0, tag, &msg, &status);
-
-        int count = 0;
-        MPICHECK(MPI_Get_count(&status, getMpiDtype(mpi::MpiTypeConverter<std::remove_cv_t<T>>::value), &count));
-        EXPECT_EQ(1, count);
-
-        T value{};
-        MPICHECK(
-            MPI_Mrecv(&value, count, getMpiDtype(mpi::MpiTypeConverter<std::remove_cv_t<T>>::value), &msg, &status));
-        EXPECT_EQ(value, expectedValue);
-    }
-}
-
-TEST(MPIUtils, SendMRecv)
-{
-    auto& comm = mpi::MpiComm::world();
-    if (comm.getSize() < 2)
-    {
-        GTEST_SKIP() << "Test requires at least 2 processes";
-    }
-
-    testSendMRecv<float>();
-    testSendMRecv<bool>();
-    testSendMRecv<std::int8_t>();
-    testSendMRecv<std::uint8_t>();
-    testSendMRecv<std::int32_t>();
-    testSendMRecv<std::uint32_t>();
-    testSendMRecv<std::int64_t>();
-    testSendMRecv<std::uint64_t>();
 }
 
 TEST(MPIUtils, SessionCommunicator)

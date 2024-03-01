@@ -65,8 +65,7 @@ class TestGPT(unittest.TestCase):
                                   batch_size, input_len, output_len, fp16,
                                   gpt_attention_plugin, tensor_parallel,
                                   apply_query_key_layer_scaling,
-                                  gather_context_logits,
-                                  gather_generation_logits):
+                                  gather_all_token_logits):
         num_layers = gpt_config.n_layer
         num_heads = gpt_config.n_head
         hidden_size = gpt_config.n_embd
@@ -90,13 +89,12 @@ class TestGPT(unittest.TestCase):
                                              tp_size=tensor_parallel),
                 apply_query_key_layer_scaling=apply_query_key_layer_scaling)
             inputs = tensorrt_llm_gpt.prepare_inputs(
-                max_batch_size=batch_size,
-                max_input_len=input_len,
-                max_seq_len=input_len + output_len,
+                batch_size,
+                input_len,
+                output_len,
                 use_cache=True,
                 max_beam_width=1,
-                gather_context_logits=gather_context_logits,
-                gather_generation_logits=gather_generation_logits)
+                gather_all_token_logits=gather_all_token_logits)
             load_from_hf_gpt(tensorrt_llm_gpt,
                              hf_gpt,
                              dtype="float16" if fp16 else "float32")
@@ -127,8 +125,7 @@ class TestGPT(unittest.TestCase):
                                   enable_remove_input_padding=False,
                                   enable_paged_kv_cache=False,
                                   tokens_per_block=128,
-                                  gather_context_logits=False,
-                                  gather_generation_logits=False):
+                                  gather_all_token_logits=False):
         mapping = tensorrt_llm.Mapping(world_size, rank, tp_size=world_size)
 
         runtime = None
@@ -143,12 +140,10 @@ class TestGPT(unittest.TestCase):
                 timing_cache='model.cache',
                 tensor_parallel=world_size,  # TP only
                 use_refit=use_refit,
-                gather_context_logits=gather_context_logits,
-                gather_generation_logits=gather_generation_logits,
+                gather_all_token_logits=gather_all_token_logits,
                 strongly_typed=fp16,
             )
             network = builder.create_network()
-            network.plugin_config.to_legacy_setting()
             if use_plugin:
                 network.plugin_config.set_gpt_attention_plugin(dtype)
             if fast_building:
@@ -163,8 +158,7 @@ class TestGPT(unittest.TestCase):
                                            batch_size, input_len, output_len,
                                            fp16, use_plugin, world_size,
                                            apply_query_key_layer_scaling,
-                                           gather_context_logits,
-                                           gather_generation_logits)
+                                           gather_all_token_logits)
 
             engine_buffer = builder.build_engine(network, builder_config)
             runtime = tensorrt_llm.runtime.generation._Runtime(
@@ -400,7 +394,7 @@ class TestGPT(unittest.TestCase):
             product([False, True], [False, True], [False, True], [
                 ContextFMHAType.disabled, ContextFMHAType.enabled,
                 ContextFMHAType.enabled_with_fp32_acc
-            ], [False, True], [False, True], [False, True], [False, True]))
+            ], [False, True], [False, True], [False, True]))
 
         return test_cases
 
@@ -408,14 +402,17 @@ class TestGPT(unittest.TestCase):
     def test_gpt_plugin(self, use_refit, fast_building,
                         apply_query_key_layer_scaling, context_fmha_type,
                         enable_remove_input_padding, enable_paged_kv_cache,
-                        gather_context_logits, gather_generation_logits):
+                        gather_all_token_logits):
         # inflight batching mode only works with remove_input_padding and paged_kv_cache
-        use_in_flight_batching = enable_remove_input_padding and enable_paged_kv_cache and not (
-            gather_context_logits or gather_generation_logits)
+        use_in_flight_batching = enable_remove_input_padding and enable_paged_kv_cache and not gather_all_token_logits
 
         # Skip tests that are not supported in pre-ampere architecture
         if getSMVersion() < 80:
-            if context_fmha_type == ContextFMHAType.enabled_with_fp32_acc:
+            if context_fmha_type == ContextFMHAType.enabled:
+                pytest.skip(
+                    "ContextFMHAType is not supported in pre-ampere architecture"
+                )
+            elif context_fmha_type == ContextFMHAType.enabled_with_fp32_acc:
                 pytest.skip(
                     "ContextFMHAType with fp32 acc is not supported in pre-ampere architecture"
                 )
@@ -444,7 +441,7 @@ class TestGPT(unittest.TestCase):
             use_plugin, batch_size, seq_len, max_length, use_refit,
             fast_building, apply_query_key_layer_scaling, context_fmha_type,
             enable_remove_input_padding, enable_paged_kv_cache,
-            tokens_per_block, gather_context_logits, gather_generation_logits)
+            tokens_per_block, gather_all_token_logits)
         key_value_cache_buffers = []
         value_cache_buffers = []
         head_size = gpt_config.n_embd // gpt_config.n_head
@@ -551,29 +548,31 @@ class TestGPT(unittest.TestCase):
             if enable_paged_kv_cache:
                 assert beam_width == 1
                 # for beam_width > 1 the argument must be '1' in ctx phase and 'beam_width' in gen phase
-                host_kv_cache_block_pointers = kv_cache_manager.get_block_pointers(
+                host_kv_cache_block_pointers = kv_cache_manager.get_pointer_arrays(
                     1)
-                kv_cache_block_pointers = host_kv_cache_block_pointers.to(
-                    'cuda')
+                kv_cache_block_pointers = [
+                    x.to('cuda') for x in host_kv_cache_block_pointers
+                ]
 
-                shape = kv_cache_block_pointers.shape
-                shape = [shape[0], shape[1] * shape[2], *shape[3:]]
-                ctx_buffer[
-                    f'kv_cache_block_pointers'] = kv_cache_block_pointers.reshape(
-                        shape).contiguous()
-                ctx_buffer[
-                    f'host_kv_cache_block_pointers'] = host_kv_cache_block_pointers.reshape(
-                        shape).contiguous()
-                ctx_buffer[
-                    f'host_max_attention_window_sizes'] = host_max_attention_window_sizes
+                for idx in range(gpt_config.n_layer):
+                    shape = kv_cache_block_pointers[idx].shape
+                    shape = [shape[0] * shape[1], *shape[2:]]
+                    ctx_buffer[
+                        f'kv_cache_block_pointers_{idx}'] = kv_cache_block_pointers[
+                            idx].reshape(shape).contiguous()
+                    ctx_buffer[
+                        f'host_kv_cache_block_pointers_{idx}'] = host_kv_cache_block_pointers[
+                            idx].reshape(shape).contiguous()
+                    ctx_buffer[
+                        f'host_max_attention_window_size_{idx}'] = host_max_attention_window_sizes
             else:
                 for i in range(gpt_config.n_layer):
                     ctx_buffer[f'past_key_value_{i}'] = key_value_cache_buffers[
                         i]
                     ctx_buffer[
                         f'present_key_value_{i}'] = key_value_cache_buffers[i]
-                ctx_buffer[
-                    f'host_max_attention_window_sizes'] = host_max_attention_window_sizes
+                    ctx_buffer[
+                        f'host_max_attention_window_size_{i}'] = host_max_attention_window_sizes
 
             ctx_shape = {
                 key: buffer.shape
@@ -621,8 +620,7 @@ class TestGPT(unittest.TestCase):
                 ctx_last_token_ids = torch.cumsum(ctx_last_token_ids,
                                                   dim=0).int()
 
-            host_max_attention_window_sizes = torch.tensor([total_length] *
-                                                           gpt_config.n_layer,
+            host_max_attention_window_sizes = torch.tensor([total_length],
                                                            dtype=torch.int32)
             host_sink_token_length = torch.tensor([0], dtype=torch.int32)
 
@@ -651,7 +649,7 @@ class TestGPT(unittest.TestCase):
                 host_context_lengths=host_context_lengths,
                 host_request_types=host_request_types)
 
-            if gather_context_logits:
+            if gather_all_token_logits:
                 np.testing.assert_allclose(ref.cpu().numpy().flatten(),
                                            res.cpu().numpy().flatten(),
                                            atol=1e-1)
@@ -697,8 +695,7 @@ class TestGPT(unittest.TestCase):
             host_past_key_value_lengths = torch.tensor([seq_len + step - 1] *
                                                        batch_size,
                                                        dtype=torch.int32)
-            host_max_attention_window_sizes = torch.tensor([seq_len + step] *
-                                                           gpt_config.n_layer,
+            host_max_attention_window_sizes = torch.tensor([seq_len + step],
                                                            dtype=torch.int32)
             host_sink_token_length = torch.tensor([0], dtype=torch.int32)
 
@@ -775,8 +772,7 @@ class TestGPT(unittest.TestCase):
                 [0] * num_context_input + [seq_len] * num_generation_input,
                 dtype=torch.int32)
 
-            host_max_attention_window_sizes = torch.tensor([total_length] *
-                                                           gpt_config.n_layer,
+            host_max_attention_window_sizes = torch.tensor([total_length],
                                                            dtype=torch.int32)
 
             host_sink_token_length = torch.tensor([0], dtype=torch.int32)
@@ -853,9 +849,7 @@ class TestGPT(unittest.TestCase):
             log_level, dtype, world_size, rank, gpt_config, hf_gpt, model,
             use_plugin, batch_size, seq_len, max_new_tokens, use_refit)
 
-        model_config = ModelConfig(max_batch_size=batch_size,
-                                   max_beam_width=num_beams,
-                                   vocab_size=gpt_config.vocab_size,
+        model_config = ModelConfig(vocab_size=gpt_config.vocab_size,
                                    num_layers=gpt_config.n_layer,
                                    num_heads=gpt_config.n_head,
                                    num_kv_heads=gpt_config.n_head,

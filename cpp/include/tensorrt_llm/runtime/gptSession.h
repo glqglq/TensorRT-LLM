@@ -20,7 +20,6 @@
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/cudaEvent.h"
-#include "tensorrt_llm/runtime/decodingMode.h"
 #include "tensorrt_llm/runtime/generationInput.h"
 #include "tensorrt_llm/runtime/generationOutput.h"
 #include "tensorrt_llm/runtime/gptModelConfig.h"
@@ -91,7 +90,6 @@ public:
         KvCacheConfig kvCacheConfig{};
         std::optional<SizeType> ctxMicroBatchSize = std::nullopt;
         std::optional<SizeType> genMicroBatchSize = std::nullopt;
-        std::optional<DecodingMode> decodingMode = std::nullopt;
     };
 
     GptSession(Config const& sessionConfig, GptModelConfig const& modelConfig, WorldConfig const& worldConfig,
@@ -108,6 +106,13 @@ public:
         std::string const& engineFile, LoggerPtr logger = nullptr)
         : GptSession(sessionConfig, modelConfig, worldConfig, utils::loadEngine(engineFile), std::move(logger))
     {
+    }
+
+    GptSession(Config const& sessionConfig, GptModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        std::string const& engineFile,LoggerPtr logger, int rank)
+        : GptSession(sessionConfig, modelConfig, worldConfig, utils::loadEngine(engineFile), std::move(logger))
+    {
+        mRank = rank;
     }
 
     [[nodiscard]] nvinfer1::ILogger& getLogger() const;
@@ -132,6 +137,7 @@ public:
     [[nodiscard]] nvinfer1::DataType getLogitDataType() const;
 
     void generate(GenerationOutput& outputs, GenerationInput const& inputs, SamplingConfig const& samplingConfig);
+    void printModelLatency();
 
 private:
     [[nodiscard]] bool useCudaGraphs()
@@ -148,8 +154,7 @@ private:
     void createContexts();
     void createBuffers(SizeType numMicroBatches);
     void createDecoders(SizeType batchSize, SizeType beamWidth, SizeType maxAttentionWindow, SizeType sinkTokenLength,
-        SizeType maxSequenceLength, nvinfer1::DataType logitsType, bool decoderPerRequest, SizeType numMicroBatches,
-        DecodingMode const& decodingMode);
+        SizeType maxSequenceLength, nvinfer1::DataType logitsType, bool decoderPerRequest, SizeType numMicroBatches);
     void createKvCacheManager(SizeType batchSize, SizeType beamWidth, SizeType maxAttentionWindow,
         SizeType sinkTokenLength, SizeType maxSequenceLength, KvCacheConfig const& config);
     void createCustomAllReduceWorkspace(SizeType batchSize, SizeType beamWidth, SizeType maxSequenceLength);
@@ -275,6 +280,15 @@ private:
     bool mCudaGraphMode{false};
     // ping-pong instances
     std::vector<CudaGraphExecutor> mCudaGraphInstances;
+
+    int mRank;
+
+    float allGenerationDuration;
+    float allPrefillDuration;
+    int allGenerationCount;
+    int allPrefillCount;
+
+
 };
 
 } // namespace tensorrt_llm::runtime

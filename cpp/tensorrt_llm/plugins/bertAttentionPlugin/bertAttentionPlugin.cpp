@@ -47,27 +47,8 @@ BertAttentionPlugin::BertAttentionPlugin(int num_heads, int head_size, float q_s
     , mRemovePadding(remove_padding)
 {
     // pre-check whether FMHA is supported in order to save memory allocation
-    if (mEnableContextFMHA)
-    {
-        mEnableContextFMHA = false;
-        if (!(mType == DataType::kHALF || mType == DataType::kBF16))
-        {
-            TLLM_LOG_WARNING("Fall back to unfused MHA because of unsupported data type.");
-        }
-        else if (!MHARunner::fmha_supported(mHeadSize, mSM))
-        {
-            TLLM_LOG_WARNING(
-                "Fall back to unfused MHA because of unsupported head size %d in sm_{%d}.", mHeadSize, mSM);
-        }
-        else if (mRelativeAttention)
-        {
-            TLLM_LOG_WARNING("Fall back to unfused MHA because of relative position embedding.");
-        }
-        else
-        {
-            mEnableContextFMHA = true;
-        }
-    }
+    mEnableContextFMHA = mEnableContextFMHA && (mType == DataType::kHALF) && MHARunner::fmha_supported(mHeadSize, mSM)
+        && !mRelativeAttention;
 }
 
 // Parameterized constructor
@@ -84,11 +65,7 @@ BertAttentionPlugin::BertAttentionPlugin(const void* data, size_t length)
     read(d, mRelativeAttention);
     read(d, mMaxDistance);
     read(d, mRemovePadding);
-    TLLM_CHECK_WITH_INFO(d == a + length,
-        "Expected length (%d) != real length (%d). This is often "
-        "caused by using different TensorRT-LLM version to build "
-        "engine and run engine.",
-        (int) length, (int) (d - a));
+    TLLM_CHECK(d == a + length);
 }
 
 // IPluginV2DynamicExt Methods
@@ -469,23 +446,9 @@ int BertAttentionPlugin::initialize() noexcept
     mCublasWrapper.reset(new tc::CublasMMWrapper(cublasHandle, cublasLtHandle, nullptr, nullptr));
     if (mEnableContextFMHA)
     {
-        // Pre-checked during constructing.
-        Data_type data_type;
-        if (mType == DataType::kHALF)
-        {
-            data_type = DATA_TYPE_FP16;
-        }
-        else if (mType == DataType::kBF16)
-        {
-            data_type = DATA_TYPE_BF16;
-        }
-        else
-        {
-            TLLM_CHECK_WITH_INFO(false, "GPTAttentionPlugin received wrong data type.");
-        }
-        mFMHARunner.reset(new FusedMHARunnerV2(data_type, mNumHeads, mHeadSize, mQScaling));
+        mFMHARunner.reset(new FusedMHARunnerV2(DATA_TYPE_FP16, mNumHeads, mHeadSize, mQScaling));
         // set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads = num_heads
-        mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, false, mNumHeads);
+        mFMHARunner->setup_flags(mFMHAForceFP32Acc, true, false, mNumHeads);
     }
 
     return 0;

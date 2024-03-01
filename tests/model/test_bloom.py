@@ -89,12 +89,11 @@ class TestBloom(unittest.TestCase):
 
         with net_guard(network):
             network.set_named_parameters(tensorrt_llm_bloom.named_parameters())
-            inputs = tensorrt_llm_bloom.prepare_inputs(
-                max_batch_size=batch_size,
-                max_input_len=input_len,
-                max_seq_len=input_len + output_len,
-                use_cache=True,
-                max_beam_width=1)
+            inputs = tensorrt_llm_bloom.prepare_inputs(batch_size,
+                                                       input_len,
+                                                       output_len,
+                                                       use_cache=True,
+                                                       max_beam_width=1)
             # Prepare
             tensorrt_llm_bloom(**inputs)
 
@@ -133,7 +132,6 @@ class TestBloom(unittest.TestCase):
                 strongly_typed=fp16,
             )
             network = builder.create_network()
-            network.plugin_config.to_legacy_setting()
             if use_plugin:
                 network.plugin_config.set_gpt_attention_plugin(dtype)
             if fast_building:
@@ -217,8 +215,7 @@ class TestBloom(unittest.TestCase):
                                            dtype=torch.int32).cuda()
         ctx_host_past_key_value_lengths = torch.tensor([0] * batch_size,
                                                        dtype=torch.int32)
-        host_max_attention_window_sizes = torch.tensor([total_length] *
-                                                       bloom_config.n_layer,
+        host_max_attention_window_sizes = torch.tensor([total_length],
                                                        dtype=torch.int32)
         host_sink_token_length = torch.tensor([0], dtype=torch.int32)
 
@@ -264,20 +261,16 @@ class TestBloom(unittest.TestCase):
 
         ctx_shape = {k: v.shape for k, v in ctx_buffer.items()}
 
-        ctx_shape.update(
-            {f'host_max_attention_window_sizes': (bloom_config.n_layer, )})
-        ctx_buffer.update({
-            f'host_max_attention_window_sizes':
-            host_max_attention_window_sizes
-        })
-
         for i in range(bloom_config.n_layer):
             shape = (batch_size, 2, bloom_config.n_head, 0,
                      bloom_config.hidden_size // bloom_config.n_head)
             past_buffer = torch.zeros((1, ),
                                       dtype=str_dtype_to_torch(dtype),
                                       device='cuda')
-            ctx_shape.update({f'past_key_value_{i}': shape})
+            ctx_shape.update({
+                f'past_key_value_{i}': shape,
+                f'host_max_attention_window_size_{i}': (1, ),
+            })
             shape = (batch_size, 2, bloom_config.n_head, seq_len,
                      bloom_config.hidden_size // bloom_config.n_head)
             ctx_buffer.update({
@@ -287,6 +280,8 @@ class TestBloom(unittest.TestCase):
                 torch.zeros(shape,
                             dtype=str_dtype_to_torch(dtype),
                             device='cuda'),
+                f'host_max_attention_window_size_{i}':
+                host_max_attention_window_sizes,
             })
 
         context = runtime.ctx_context
@@ -323,6 +318,8 @@ class TestBloom(unittest.TestCase):
         gen_host_past_key_value_lengths = torch.tensor([seq_len + step - 1] *
                                                        batch_size,
                                                        dtype=torch.int32)
+        gen_host_max_attention_window_sizes = torch.tensor([total_length],
+                                                           dtype=torch.int32)
         gen_host_sink_token_length = torch.tensor([0], dtype=torch.int32)
         step1_buffer = {
             'input_ids': gen_id,
@@ -346,19 +343,19 @@ class TestBloom(unittest.TestCase):
 
         step1_shape = {k: v.shape for k, v in step1_buffer.items()}
 
-        step1_shape.update(
-            {f'host_max_attention_window_sizes': (bloom_config.n_layer, )})
-        step1_buffer.update({
-            f'host_max_attention_window_sizes':
-            host_max_attention_window_sizes
-        })
-
         for i in range(bloom_config.n_layer):
             shape = (batch_size, 2, bloom_config.n_head, seq_len,
                      bloom_config.hidden_size // bloom_config.n_head)
-            step1_shape.update({f'past_key_value_{i}': shape})
-            step1_buffer.update(
-                {f'past_key_value_{i}': ctx_buffer[f'present_key_value_{i}']})
+            step1_shape.update({
+                f'past_key_value_{i}': shape,
+                f'host_max_attention_window_size_{i}': (1, ),
+            })
+            step1_buffer.update({
+                f'past_key_value_{i}':
+                ctx_buffer[f'present_key_value_{i}'],
+                f'host_max_attention_window_size_{i}':
+                host_max_attention_window_sizes,
+            })
 
         context = runtime.context_1
         runtime._set_shape(context, step1_shape)
@@ -386,7 +383,11 @@ class TestBloom(unittest.TestCase):
 
         # Skip tests that are not supported in pre-ampere architecture
         if getSMVersion() < 80:
-            if context_fmha_type == ContextFMHAType.enabled_with_fp32_acc:
+            if context_fmha_type == ContextFMHAType.enabled:
+                pytest.skip(
+                    "ContextFMHAType is not supported in pre-ampere architecture"
+                )
+            elif context_fmha_type == ContextFMHAType.enabled_with_fp32_acc:
                 pytest.skip(
                     "ContextFMHAType with fp32 acc is not supported in pre-ampere architecture"
                 )
@@ -432,8 +433,6 @@ class TestBloom(unittest.TestCase):
             enable_remove_input_padding=enable_remove_input_padding)
 
         model_config = ModelConfig(
-            max_batch_size=batch_size,
-            max_beam_width=num_beams,
             vocab_size=bloom_config.vocab_size,
             num_layers=bloom_config.n_layer,
             num_heads=bloom_config.n_head,

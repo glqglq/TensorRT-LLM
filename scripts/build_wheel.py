@@ -23,7 +23,7 @@ from functools import partial
 from multiprocessing import cpu_count
 from pathlib import Path
 from shutil import copy, rmtree
-from subprocess import CalledProcessError, check_output, run
+from subprocess import check_output, run
 from textwrap import dedent
 from typing import List
 
@@ -53,9 +53,8 @@ def main(build_type: str = "Release",
          cpp_only: bool = False,
          install: bool = False,
          skip_building_wheel: bool = False,
-         python_bindings: bool = True,
-         benchmarks: bool = False,
-         nvtx: bool = False):
+         python_bindings: bool = False,
+         benchmarks: bool = False):
     project_dir = Path(__file__).parent.resolve().parent
     os.chdir(project_dir)
     build_run = partial(run, shell=True, check=True)
@@ -63,17 +62,17 @@ def main(build_type: str = "Release",
     if not (project_dir / "3rdparty/cutlass/.git").exists():
         build_run('git submodule update --init --recursive')
 
-    on_windows = platform.system() == "Windows"
-    requirements_filename = "requirements-dev-windows.txt" if on_windows else "requirements-dev.txt"
-    build_run(
-        f"\"{sys.executable}\" -m pip install -r {requirements_filename} --extra-index-url https://pypi.ngc.nvidia.com"
-    )
+    requirements_filename = "requirements-dev-windows.txt" if platform.system(
+    ) == "Windows" else "requirements-dev.txt"
+    # build_run(
+    #     f"\"{sys.executable}\" -m pip install -r {requirements_filename} --extra-index-url https://pypi.ngc.nvidia.com"
+    # )
     # Ensure TRT is installed on windows to prevent surprises.
     reqs = check_output([sys.executable, "-m", "pip", "freeze"])
     installed_packages = [r.decode().split("==")[0] for r in reqs.split()]
     if "tensorrt" not in installed_packages:
         error_msg = "TensorRT was not installed properly."
-        if on_windows:
+        if platform.system() == "Windows":
             error_msg += (
                 " Please download the TensorRT zip file manually,"
                 " install it and relaunch build_wheel.py."
@@ -92,7 +91,7 @@ def main(build_type: str = "Release",
 
     hardware_arch = platform.machine()
 
-    if on_windows:
+    if platform.system() == "Windows":
         # Windows does not support multi-device currently.
         extra_cmake_vars.extend(["ENABLE_MULTI_DEVICE=0"])
 
@@ -151,25 +150,25 @@ def main(build_type: str = "Release",
 
     build_pyt = "OFF" if cpp_only else "ON"
     th_common_lib = "" if cpp_only else "th_common"
-    build_pybind = "OFF" if cpp_only else "ON"
-    bindings_lib = "" if cpp_only else "bindings"
+    build_pybind = "ON" if python_bindings else "OFF"
+    bindings_lib = "bindings" if python_bindings else ""
     benchmarks_lib = "benchmarks" if benchmarks else ""
-    disable_nvtx = "OFF" if nvtx else "ON"
 
     with working_directory(build_dir):
         cmake_def_args = " ".join(cmake_def_args)
         if clean or first_build:
             build_run(
-                f'cmake -DCMAKE_BUILD_TYPE="{build_type}" -DBUILD_PYT="{build_pyt}" -DBUILD_PYBIND="{build_pybind}" -DNVTX_DISABLE="{disable_nvtx}"'
+                f'cmake -DCMAKE_BUILD_TYPE="{build_type}" -DBUILD_PYT="{build_pyt}" -DBUILD_PYBIND="{build_pybind}"'
                 f' {cmake_cuda_architectures} {cmake_def_args} {cmake_generator} -S "{source_dir}"'
             )
         build_run(
             f'cmake --build . --config {build_type} --parallel {job_count} '
-            f'--target tensorrt_llm nvinfer_plugin_tensorrt_llm {th_common_lib} {bindings_lib} {benchmarks_lib}'
+            f'--target tensorrt_llm tensorrt_llm_static nvinfer_plugin_tensorrt_llm {th_common_lib} {bindings_lib} {benchmarks_lib}'
             f'{" ".join(extra_make_targets)}')
 
     if cpp_only:
         assert not install, "Installing is not supported for cpp_only builds"
+        assert not python_bindings, "Python bindings are not supported for cpp_only builds"
         return
 
     pkg_dir = project_dir / "tensorrt_llm"
@@ -178,17 +177,13 @@ def main(build_type: str = "Release",
     if lib_dir.exists():
         rmtree(lib_dir)
     lib_dir.mkdir(parents=True)
-    if on_windows:
-        copy(build_dir / "tensorrt_llm/tensorrt_llm.dll",
-             lib_dir / "tensorrt_llm.dll")
+    if platform.system() == "Windows":
         copy(build_dir / f"tensorrt_llm/thop/th_common.dll",
              lib_dir / "th_common.dll")
         copy(
             build_dir / f"tensorrt_llm/plugins/nvinfer_plugin_tensorrt_llm.dll",
             lib_dir / "nvinfer_plugin_tensorrt_llm.dll")
     else:
-        copy(build_dir / "tensorrt_llm/libtensorrt_llm.so",
-             lib_dir / "libtensorrt_llm.so")
         copy(build_dir / "tensorrt_llm/thop/libth_common.so",
              lib_dir / "libth_common.so")
         copy(
@@ -196,11 +191,11 @@ def main(build_type: str = "Release",
             "tensorrt_llm/plugins/libnvinfer_plugin_tensorrt_llm.so",
             lib_dir / "libnvinfer_plugin_tensorrt_llm.so")
 
-    if not cpp_only:
+    if python_bindings:
 
         def get_pybind_lib():
             pybind_build_dir = (build_dir / "tensorrt_llm" / "pybind")
-            if on_windows:
+            if platform.system() == "Windows":
                 pybind_lib = list(pybind_build_dir.glob("bindings.*.pyd"))
             else:
                 pybind_lib = list(pybind_build_dir.glob("bindings.*.so"))
@@ -213,41 +208,24 @@ def main(build_type: str = "Release",
         copy(get_pybind_lib(), pkg_dir)
 
         with working_directory(project_dir):
-            build_run(f"\"{sys.executable}\" -m pip install pybind11-stubgen")
+            build_run(f"{sys.executable} -m pip install pybind11-stubgen")
         with working_directory(pkg_dir):
-            if on_windows:
-                stubgen = "stubgen.py"
-                stubgen_contents = """
-                # Loading torch, trt before bindings is required to avoid import errors on windows.
-                # isort: off
-                import torch
-                import tensorrt as trt
-                # isort: on
-                import os
-                import platform
+            stubgen = "stubgen.py"
+            # Loading torch, trt before bindings is required to avoid import errors on windows.
+            stubgen_contents = """
+            # isort: off
+            import torch
+            import tensorrt as trt
+            # isort: on
 
-                from pybind11_stubgen import main
+            from pybind11_stubgen import main
 
-                if __name__ == "__main__":
-                    # Load dlls from `libs` directory before launching bindings.
-                    if platform.system() == "Windows":
-                        os.add_dll_directory(r\"{lib_dir}\")
-                    main()
-                """.format(lib_dir=lib_dir)
-                (pkg_dir / stubgen).write_text(dedent(stubgen_contents))
-                build_run(f"\"{sys.executable}\" {stubgen} -o . bindings")
-                (pkg_dir / stubgen).unlink()
-            else:
-                env_ld = os.environ.copy()
-                env_ld[
-                    "LD_LIBRARY_PATH"] = f"/usr/local/cuda/compat/lib.real:{env_ld['LD_LIBRARY_PATH']}"
-                try:
-                    build_run(
-                        f"\"{sys.executable}\" -m pybind11_stubgen -o . bindings",
-                        env=env_ld)
-                except CalledProcessError as ex:
-                    print(f"Failed to build pybind11 stubgen: {ex}",
-                          file=sys.stderr)
+            if __name__ == "__main__":
+                main()
+            """
+            (pkg_dir / stubgen).write_text(dedent(stubgen_contents))
+            build_run(f"{sys.executable} {stubgen} -o . bindings")
+            (pkg_dir / stubgen).unlink()
 
     if dist_dir is None:
         dist_dir = project_dir / "build"
@@ -317,16 +295,12 @@ if __name__ == "__main__":
         action="store_true",
         help=
         "Do not build the *.whl files (they are only needed for distribution).")
-    parser.add_argument(
-        "--python_bindings",
-        "-p",
-        action="store_true",
-        help="(deprecated) Build the python bindings for the C++ runtime.")
+    parser.add_argument("--python_bindings",
+                        "-p",
+                        action="store_true",
+                        help="Build the python bindings for the C++ runtime.")
     parser.add_argument("--benchmarks",
                         action="store_true",
                         help="Build the benchmarks for the C++ runtime.")
-    parser.add_argument("--nvtx",
-                        action="store_true",
-                        help="Enable NVTX features.")
     args = parser.parse_args()
     main(**vars(args))

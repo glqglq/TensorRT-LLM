@@ -18,12 +18,9 @@
 #pragma once
 
 #include "tensorrt_llm/batch_manager/kvCacheConfig.h"
-#include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/runtime/common.h"
-#include "tensorrt_llm/runtime/decodingMode.h"
 
 #include <optional>
-#include <vector>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -36,32 +33,24 @@ public:
     using SizeType = tensorrt_llm::runtime::SizeType;
 
     explicit TrtGptModelOptionalParams(KvCacheConfig const& kvCacheConfig = KvCacheConfig{},
-        bool enableTrtOverlap = false, std::optional<std::vector<SizeType>> const& deviceIds = std::nullopt,
-        bool normalizeLogProbs = true, bool enableChunkedContext = false,
-        std::optional<runtime::DecodingMode> const& decodingMode = std::nullopt)
+        std::optional<SizeType> maxNumSequences = std::nullopt, bool enableTrtOverlap = true,
+        std::optional<std::vector<SizeType>> const& deviceIds = std::nullopt, bool normalizeLogProbs = true,
+        bool logIterationData = false)
         : kvCacheConfig{kvCacheConfig}
+        , maxNumSequences{maxNumSequences}
         , enableTrtOverlap{enableTrtOverlap}
         , deviceIds(deviceIds)
         , normalizeLogProbs{normalizeLogProbs}
-        , enableChunkedContext{enableChunkedContext}
-        , decodingMode{decodingMode}
-    {
-    }
-
-    explicit TrtGptModelOptionalParams(executor::ExecutorConfig const& executorConfig)
-        : TrtGptModelOptionalParams(KvCacheConfig(executorConfig.getKvCacheConfig()),
-            executorConfig.getEnableTrtOverlap(), executorConfig.getDeviceIds(), executorConfig.getNormalizeLogProbs(),
-            executorConfig.getEnableChunkedContext())
+        , logIterationData{logIterationData}
     {
     }
 
     KvCacheConfig kvCacheConfig;
-
+    std::optional<SizeType> maxNumSequences;
     bool enableTrtOverlap;
     std::optional<std::vector<SizeType>> deviceIds;
     bool normalizeLogProbs;
-    bool enableChunkedContext;
-    std::optional<runtime::DecodingMode> decodingMode;
+    bool logIterationData;
 };
 
 } // namespace tensorrt_llm::batch_manager

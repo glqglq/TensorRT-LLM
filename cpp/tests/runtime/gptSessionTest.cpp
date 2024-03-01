@@ -25,6 +25,7 @@
 #include "tensorrt_llm/runtime/gptJsonConfig.h"
 #include "tensorrt_llm/runtime/gptSession.h"
 #include "tensorrt_llm/runtime/tllmLogger.h"
+#include "tensorrt_llm/runtime/utils/multiDeviceUtils.h"
 #include "tensorrt_llm/runtime/utils/numpyUtils.h"
 
 #include <algorithm>
@@ -278,7 +279,6 @@ void testGptSession(fs::path const& modelPath, ModelSpec const& modelSpec, Model
         samplingConfig.topK = std::vector{0};
         samplingConfig.topP = std::vector{0.0f};
     }
-    samplingConfig.earlyStopping = std::vector{1};
 
     auto const padId = modelIds.padId;
     auto endId = modelIds.endId;
@@ -339,7 +339,6 @@ void testGptSession(fs::path const& modelPath, ModelSpec const& modelSpec, Model
     sessionConfig.ctxMicroBatchSize = microBatchSizes.ctxMicroBatchSize;
     sessionConfig.genMicroBatchSize = microBatchSizes.genMicroBatchSize;
     sessionConfig.cudaGraphMode = cudaGraphMode;
-    sessionConfig.kvCacheConfig.useUvm = false;
 
     GptSession session{sessionConfig, modelConfig, worldConfig, enginePath.string(), logger};
     EXPECT_EQ(session.getDevice(), worldConfig.getDevice());
@@ -526,7 +525,7 @@ std::string generateTestName(const testing::TestParamInfo<ParamType>& info)
     auto const beamWidth = std::get<2>(info.param);
     name.append(beamWidth == 1 ? "Sampling" : "BeamWidth" + std::to_string(beamWidth));
     if (modelSpec.mUseGptAttentionPlugin)
-        name.append("AttentionPlugin");
+        name.append("GptAttentionPlugin");
     if (modelSpec.mUsePackedInput)
         name.append("Packed");
     if (modelSpec.mUsePagedKvCache)
@@ -564,6 +563,15 @@ TEST_P(ParamTest, Test)
     auto const cudaGraphMode = std::get<3>(GetParam());
     auto const microBatchSizes = std::get<4>(GetParam());
 
+    if (!modelSpec.mUseGptAttentionPlugin && beamWidth > 1)
+        GTEST_SKIP();
+
+    if (!WorldConfig::validConfig(modelSpec.mTPSize, modelSpec.mPPSize))
+    {
+        GTEST_SKIP() << "Model's world size " << modelSpec.mPPSize * modelSpec.mTPSize
+                     << " is not equal to the system world size";
+    }
+
     if (!modelSpec.mUsePackedInput && modelSpec.mRandomEndId)
     {
         GTEST_SKIP() << "Test does not support endId test with padded inputs";
@@ -581,40 +589,18 @@ TEST_P(ParamTest, Test)
         = DATA_PATH / modelDir / ((beamWidth == 1) ? "sampling" : "beam_search_" + std::to_string(beamWidth));
     fs::path const resultsFile{resultsPath / modelSpec.mResultsFile};
 
-    // Warning: This should be the last check before running the test.
-    // It will initialize MPI which can take significant time.
-    if (!WorldConfig::validConfig(modelSpec.mTPSize, modelSpec.mPPSize))
-    {
-        GTEST_SKIP() << "Model's world size " << modelSpec.mPPSize * modelSpec.mTPSize
-                     << " is not equal to the system world size";
-    }
-
     testGptSession(
         modelPath, modelSpec, modelIds, beamWidth, kBatchSizes, resultsFile, mLogger, cudaGraphMode, microBatchSizes);
 }
-
-INSTANTIATE_TEST_SUITE_P(GptSessionOtbTest, ParamTest,
-    testing::Combine(testing::Values(ModelParams{GPT_MODEL_DIR, {50256, 50256}}),
-        testing::Values(
-            // single decoder
-            ModelSpec{FP32_GPT_DIR, FP32_RESULT_FILE, nvinfer1::DataType::kFLOAT},
-            ModelSpec{FP16_GPT_DIR, FP16_RESULT_FILE, nvinfer1::DataType::kHALF},
-            // decoderBatch
-            ModelSpec{FP32_GPT_DIR, FP32_RESULT_FILE, nvinfer1::DataType::kFLOAT}.useDecoderPerRequest(),
-            ModelSpec{FP16_GPT_DIR, FP16_RESULT_FILE, nvinfer1::DataType::kHALF}.useDecoderPerRequest()
-
-                ),
-        testing::Values(1),           // beamWidth, DISABLED beam search
-        testing::Values(false, true), // cudaGraphMode
-        testing::Values(MicroBatchSizes(), MicroBatchSizes{3, 3}, MicroBatchSizes{3, 6})),
-    generateTestName);
 
 INSTANTIATE_TEST_SUITE_P(GptSessionTest, ParamTest,
     testing::Combine(testing::Values(ModelParams{GPT_MODEL_DIR, {50256, 50256}}),
         testing::Values(
             // single decoder
+            ModelSpec{FP32_GPT_DIR, FP32_RESULT_FILE, nvinfer1::DataType::kFLOAT},
             ModelSpec{FP32_GPT_ATTENTION_DIR, FP32_PLUGIN_RESULT_FILE, nvinfer1::DataType::kFLOAT}
                 .useGptAttentionPlugin(),
+            ModelSpec{FP16_GPT_DIR, FP16_RESULT_FILE, nvinfer1::DataType::kHALF},
             ModelSpec{FP16_GPT_ATTENTION_DIR, FP16_PLUGIN_RESULT_FILE, nvinfer1::DataType::kHALF}
                 .useGptAttentionPlugin(),
             ModelSpec{FP16_GPT_ATTENTION_PACKED_DIR, FP16_PLUGIN_PACKED_RESULT_FILE, nvinfer1::DataType::kHALF}
@@ -626,9 +612,11 @@ INSTANTIATE_TEST_SUITE_P(GptSessionTest, ParamTest,
                 .usePackedInput()
                 .usePagedKvCache(),
             // decoderBatch
+            ModelSpec{FP32_GPT_DIR, FP32_RESULT_FILE, nvinfer1::DataType::kFLOAT}.useDecoderPerRequest(),
             ModelSpec{FP32_GPT_ATTENTION_DIR, FP32_PLUGIN_RESULT_FILE, nvinfer1::DataType::kFLOAT}
                 .useGptAttentionPlugin()
                 .useDecoderPerRequest(),
+            ModelSpec{FP16_GPT_DIR, FP16_RESULT_FILE, nvinfer1::DataType::kHALF}.useDecoderPerRequest(),
             ModelSpec{FP16_GPT_ATTENTION_DIR, FP16_PLUGIN_RESULT_FILE, nvinfer1::DataType::kHALF}
                 .useGptAttentionPlugin()
                 .useDecoderPerRequest(),
@@ -648,11 +636,8 @@ INSTANTIATE_TEST_SUITE_P(GptSessionTest, ParamTest,
                 .usePackedInput()
                 .usePagedKvCache()
                 .useDecoderPerRequest()
-                .useRandomEndId()
-
-                ),
-        testing::Values(1, 2),        // beamWidth
-        testing::Values(false, true), // cudaGraphMode
+                .useRandomEndId()),
+        testing::Values(1, 2), testing::Values(false, true),
         testing::Values(MicroBatchSizes(), MicroBatchSizes{3, 3}, MicroBatchSizes{3, 6})),
     generateTestName);
 
@@ -686,9 +671,7 @@ INSTANTIATE_TEST_SUITE_P(GptjSessionTest, ParamTest,
                 .useDecoderPerRequest()
 
                 ),
-        testing::Values(1, 2),  // beamWidth
-        testing::Values(false), // cudaGraphMode
-        testing::Values(MicroBatchSizes())),
+        testing::Values(1, 2), testing::Values(false), testing::Values(MicroBatchSizes())),
     generateTestName);
 
 INSTANTIATE_TEST_SUITE_P(LlamaSessionTest, ParamTest,
@@ -731,9 +714,7 @@ INSTANTIATE_TEST_SUITE_P(LlamaSessionTest, ParamTest,
                 .useTensorParallelism(2)
 
                 ),
-        testing::Values(1, 2),  // beamWidth
-        testing::Values(false), // cudaGraphMode
-        testing::Values(MicroBatchSizes())),
+        testing::Values(1, 2), testing::Values(false), testing::Values(MicroBatchSizes())),
     generateTestName);
 
 class LlamaSessionOnDemandTest : public SessionTest
@@ -787,7 +768,7 @@ class ChatGlm3SessionTest : public SessionTest // for ChatGLM3-6B
 {
 };
 
-TEST_F(ChatGlmSessionTest, HalfSamplingAttentionPluginBS1BM1)
+TEST_F(ChatGlmSessionTest, SamplingFP16WithGptAttentionPluginBS1BM1)
 {
     auto const modelName{"chatglm_6b"};
     auto const modelPath{ENGINE_PATH / modelName};
@@ -800,7 +781,7 @@ TEST_F(ChatGlmSessionTest, HalfSamplingAttentionPluginBS1BM1)
         modelPath, modelSpec, modeIds, 1, batchSizes, "", mLogger, false, MicroBatchSizes(), true, modelName);
 }
 
-TEST_F(ChatGlm2SessionTest, HalfSamplingAttentionPluginBS1BM1)
+TEST_F(ChatGlm2SessionTest, SamplingFP16WithGptAttentionPluginBS1BM1)
 {
     auto const modelName{"chatglm2_6b"};
     auto const modelPath{ENGINE_PATH / modelName};
@@ -813,8 +794,7 @@ TEST_F(ChatGlm2SessionTest, HalfSamplingAttentionPluginBS1BM1)
         modelPath, modelSpec, modeIds, 1, batchSizes, "", mLogger, false, MicroBatchSizes(), true, modelName);
 }
 
-/*
-TEST_F(ChatGlm2SessionTest, HalfSamplingAttentionPluginBS2BM1)
+TEST_F(ChatGlm2SessionTest, SamplingFP16WithGptAttentionPluginBS2BM1)
 {
     auto const modelName{"chatglm2_6b"};
     auto const modelPath{ENGINE_PATH / modelName};
@@ -826,9 +806,8 @@ TEST_F(ChatGlm2SessionTest, HalfSamplingAttentionPluginBS2BM1)
     testGptSession(
         modelPath, modelSpec, modeIds, 1, batchSizes, "", mLogger, false, MicroBatchSizes(), true, modelName);
 }
-*/
 
-TEST_F(ChatGlm2SessionTest, HalfSamplingAttentionPluginBS1BM2)
+TEST_F(ChatGlm2SessionTest, SamplingFP16WithGptAttentionPluginBS1BM2)
 {
     auto const modelName{"chatglm2_6b"};
     auto const modelPath{ENGINE_PATH / modelName};
@@ -841,7 +820,7 @@ TEST_F(ChatGlm2SessionTest, HalfSamplingAttentionPluginBS1BM2)
         modelPath, modelSpec, modeIds, 2, batchSizes, "", mLogger, false, MicroBatchSizes(), true, modelName);
 }
 
-TEST_F(ChatGlm3SessionTest, HalfSamplingAttentionPluginBS1BM1)
+TEST_F(ChatGlm3SessionTest, SamplingFP16WithGptAttentionPluginBS1BM1)
 {
     auto const modelName{"chatglm3_6b"};
     auto const modelPath{ENGINE_PATH / modelName};

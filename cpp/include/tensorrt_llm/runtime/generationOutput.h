@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/runtime/common.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 
@@ -38,6 +39,8 @@ public:
     {
         TLLM_CHECK_WITH_INFO(static_cast<bool>(this->ids), "Invalid ids tensor");
         TLLM_CHECK_WITH_INFO(static_cast<bool>(this->lengths), "Invalid lengths tensor");
+
+        generationLogitsFragments = std::make_shared<std::vector<TensorPtr>>();
     }
 
     // mandatory parameters
@@ -50,6 +53,11 @@ public:
     TensorPtr contextLogits;    // [batch_size, max_input_length, vocab_size_padded], if packed, the shape will be
                                 // [packed_size, vocab_size_padded]
     TensorPtr generationLogits; // [batch_size, beam_width, max_output_length, vocab_size_padded]
+    // generation logit pointer list
+    std::shared_ptr<std::vector<TensorPtr>> generationLogitsFragments;
+
+    TensorPtr contextLogitsHost;
+    TensorPtr generationLogitsHost;
 
     // callbacks
     Callback onTokenGenerated;

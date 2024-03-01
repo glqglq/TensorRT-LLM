@@ -33,6 +33,9 @@ class AllreducePlugin : public BasePlugin
 public:
     AllreducePlugin(
         std::set<int> group, nvinfer1::DataType type, kernels::AllReduceStrategyType strategy, int32_t counter);
+    
+    AllreducePlugin(
+        std::set<int> group, nvinfer1::DataType type, kernels::AllReduceStrategyType strategy, int32_t counter, int32_t rank);
 
     AllreducePlugin(const void* data, size_t length);
 
@@ -68,12 +71,13 @@ public:
     bool isCustomAllReduceSuported(int ranks_per_node) const noexcept;
 
 private:
-    static kernels::AllReduceStrategyType selectImplementation(size_t messageSize, int worldSize) noexcept;
+    kernels::AllReduceStrategyType selectImplementation(size_t messageSize, int worldSize) const noexcept;
     const std::string mLayerName;
     std::set<int> mGroup;
     nvinfer1::DataType mType;
     kernels::AllReduceStrategyType mStrategy;
     int32_t mCounter;
+    int32_t mRank;
 };
 
 class AllreducePluginCreator : public BaseCreator

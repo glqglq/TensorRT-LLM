@@ -15,10 +15,8 @@
 import unittest
 from collections import OrderedDict
 
-# isort: off
-import torch
 import tensorrt as trt
-# isort: on
+import torch
 from parameterized import parameterized
 
 import tensorrt_llm
@@ -39,7 +37,7 @@ class TestPluginNoCache(unittest.TestCase):
                      max_batch_size,
                      max_beam_width,
                      max_input_len,
-                     max_seq_len,
+                     max_new_tokens,
                      num_kv_heads,
                      head_size,
                      dtype,
@@ -57,21 +55,20 @@ class TestPluginNoCache(unittest.TestCase):
             precision=dtype,
         )
         net = builder.create_network()
-        net.plugin_config.to_legacy_setting()
         net.plugin_config.set_gpt_attention_plugin(dtype)
         net.plugin_config.set_context_fmha(context_fmha_type)
         net.plugin_config.remove_input_padding = remove_input_padding
         with tensorrt_llm.net_guard(net):
             inputs = GenerationMixin().prepare_attention_inputs(
-                max_batch_size=max_batch_size,
-                max_beam_width=max_beam_width,
-                max_input_len=max_input_len,
-                max_seq_len=max_seq_len,
-                num_kv_heads=num_kv_heads,
-                head_size=head_size,
-                num_layers=num_layers,
-                kv_dtype=kv_dtype,
-                remove_input_padding=remove_input_padding,
+                max_batch_size,
+                max_beam_width,
+                max_input_len,
+                max_new_tokens,
+                num_kv_heads,
+                head_size,
+                num_layers,
+                kv_dtype,
+                remove_input_padding,
                 use_gpt_attention_plugin=True,
                 use_gemm_plugin=
                 True,  # because we don't want two optimization profiles
@@ -101,7 +98,7 @@ class TestPluginNoCache(unittest.TestCase):
             sequence_length = inputs['sequence_length']
             host_context_lengths = inputs['host_context_lengths']
             host_max_attention_window_sizes = inputs[
-                'host_max_attention_window_sizes']
+                'host_max_attention_window_sizes'][0]
             host_sink_token_length = inputs['host_sink_token_length']
             context_lengths = inputs['context_lengths']
             host_request_types = inputs['host_request_types']
@@ -122,7 +119,6 @@ class TestPluginNoCache(unittest.TestCase):
                 context_lengths=context_lengths,
                 cache_indirection=cache_indirection,
                 host_request_types=host_request_types,
-                layer_idx=0,
                 num_heads=num_kv_heads,
                 num_kv_heads=num_kv_heads,
                 hidden_size_per_head=head_size,
@@ -157,7 +153,7 @@ class TestPluginNoCache(unittest.TestCase):
         max_batch_size = 8
         max_beam_width = 1
         max_input_len = 128
-        max_seq_len = max_input_len
+        max_new_tokens = 0
         num_kv_heads = 16
         head_size = 32
         num_layers = 1
@@ -205,23 +201,22 @@ class TestPluginNoCache(unittest.TestCase):
                                      dtype=str_dtype_to_torch(dtype),
                                      device="cuda")
 
-        engine = TestPluginNoCache.build_engine(
-            qkv_shape=qkv_shape,
-            max_batch_size=max_batch_size,
-            max_beam_width=max_beam_width,
-            max_input_len=max_input_len,
-            max_seq_len=max_seq_len,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=dtype,
-            num_layers=num_layers,
-            remove_input_padding=remove_input_padding,
-            context_fmha_type=fmha_type,
-            use_cache=False)
+        engine = TestPluginNoCache.build_engine(qkv_shape,
+                                                max_batch_size,
+                                                max_beam_width,
+                                                max_input_len,
+                                                max_new_tokens,
+                                                num_kv_heads,
+                                                head_size,
+                                                dtype,
+                                                num_layers,
+                                                remove_input_padding,
+                                                fmha_type,
+                                                use_cache=False)
         session = tensorrt_llm.runtime.Session.from_serialized_engine(engine)
         inputs = {
             'qkv': qkv,
-            'host_max_attention_window_sizes': host_max_attention_window_sizes,
+            'host_max_attention_window_size_0': host_max_attention_window_sizes,
             'host_sink_token_length': host_sink_token_length,
             'context_lengths': context_lengths,
             'host_request_types': host_request_types,
@@ -241,25 +236,18 @@ class TestPluginNoCache(unittest.TestCase):
         stream = torch.cuda.current_stream()
         session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
 
-        engine = TestPluginNoCache.build_engine(
-            qkv_shape=qkv_shape,
-            max_batch_size=max_batch_size,
-            max_beam_width=max_beam_width,
-            max_input_len=max_input_len,
-            max_seq_len=max_seq_len,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=dtype,
-            num_layers=num_layers,
-            remove_input_padding=remove_input_padding,
-            context_fmha_type=fmha_type)
+        engine = TestPluginNoCache.build_engine(qkv_shape, max_batch_size,
+                                                max_beam_width, max_input_len,
+                                                max_new_tokens, num_kv_heads,
+                                                head_size, dtype, num_layers,
+                                                remove_input_padding, fmha_type)
         session = tensorrt_llm.runtime.Session.from_serialized_engine(engine)
 
         inputs = {
             'qkv': qkv,
             'sequence_length': sequence_length,
             'host_past_key_value_lengths': host_past_key_value_lengths,
-            'host_max_attention_window_sizes': host_max_attention_window_sizes,
+            'host_max_attention_window_size_0': host_max_attention_window_sizes,
             'host_sink_token_length': host_sink_token_length,
             'context_lengths': context_lengths,
             'cache_indirection': cache_indirection,

@@ -31,7 +31,7 @@ namespace tensorrt_llm::runtime::utils
 int initDevice(WorldConfig const& worldConfig)
 {
     auto const device = worldConfig.getDevice();
-    TLLM_CUDA_CHECK(cudaSetDevice(device));
+    TLLM_CUDA_CHECK(cudaSetDevice(0));
     return device;
 }
 
@@ -112,16 +112,6 @@ void insertTensorSlices(
         ITensor::SharedPtr slice = ITensor::slice(tensor, i, 1);
         slice->squeeze(0);
         map.insert_or_assign(key + std::to_string(indexOffset + i), slice);
-    }
-}
-
-void printTensorMap(std::ostream& stream, StringPtrMap<ITensor> const& map)
-{
-    for (auto const& [name, tensor] : map)
-    {
-        stream << "Tensor name: " << name << '\n';
-        stream << "Shape" << tensor->getShape() << '\n';
-        stream << *tensor << '\n';
     }
 }
 

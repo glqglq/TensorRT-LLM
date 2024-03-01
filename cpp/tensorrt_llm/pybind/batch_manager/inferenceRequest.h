@@ -18,7 +18,6 @@
 #pragma once
 
 #include "tensorrt_llm/batch_manager/inferenceRequest.h"
-#include "tensorrt_llm/pybind/batch_manager/llmRequest.h"
 #include "tensorrt_llm/pybind/batch_manager/namedTensor.h"
 
 #include <ATen/ATen.h>
@@ -31,37 +30,29 @@ namespace tensorrt_llm::pybind::batch_manager
 {
 
 class InferenceRequest
-    : public tensorrt_llm::batch_manager::GenericInferenceRequest<at::Tensor, NamedTensor, c10::Stream>
+    : public tensorrt_llm::batch_manager::GenericInferenceRequest<std::optional<at::Tensor>, NamedTensor>
 {
 public:
-    using Base = tensorrt_llm::batch_manager::GenericInferenceRequest<at::Tensor, NamedTensor, c10::Stream>;
+    using Base = tensorrt_llm::batch_manager::GenericInferenceRequest<std::optional<at::Tensor>, NamedTensor>;
     using TensorPtr = Base::TensorPtr;
     using TensorMap = Base::TensorMap;
-    using LogitsProcessorCallback = Base::LogitsPostProcessor;
 
-    InferenceRequest(uint64_t requestId, std::optional<LogitsProcessorCallback> logitsCb = std::nullopt)
-        : Base(requestId, logitsCb)
+    InferenceRequest(uint64_t requestId)
+        : Base(requestId)
     {
     }
 
-    InferenceRequest(uint64_t requestId, TensorMap const& inputTensors,
-        std::optional<LogitsProcessorCallback> logitsCb = std::nullopt)
-        : Base{requestId, inputTensors, logitsCb}
+    InferenceRequest(uint64_t requestId, TensorMap const& inputTensors)
+        : Base{requestId, inputTensors}
     {
     }
 
-    InferenceRequest(
-        uint64_t requestId, TensorMap&& inputTensors, std::optional<LogitsProcessorCallback> logitsCb = std::nullopt)
-        : Base{requestId, std::move(inputTensors), logitsCb}
+    InferenceRequest(uint64_t requestId, TensorMap&& inputTensors)
+        : Base{requestId, std::move(inputTensors)}
     {
     }
 
     [[nodiscard]] std::shared_ptr<tensorrt_llm::batch_manager::InferenceRequest> toTrtLlm() const;
-
-    std::string serialize() const;
-
-    static std::shared_ptr<InferenceRequest> deserialize(std::string const& serialized);
-
     static void initBindings(pybind11::module_& m);
 };
 

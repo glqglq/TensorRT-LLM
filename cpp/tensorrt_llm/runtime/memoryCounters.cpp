@@ -45,6 +45,8 @@ std::string doubleBytesToString(double bytes, int precision)
 
 namespace tensorrt_llm::runtime
 {
+thread_local MemoryCounters MemoryCounters::mInstance;
+
 std::string MemoryCounters::bytesToString(SizeType bytes, int precision)
 {
     return doubleBytesToString(static_cast<double>(bytes), precision);
@@ -81,11 +83,5 @@ void MemoryCounters::deallocate(MemoryType memoryType, MemoryCounters::SizeType 
     case MemoryType::kPINNED: deallocate<MemoryType::kPINNED>(size); break;
     default: TLLM_THROW("Unknown memory type");
     }
-}
-
-MemoryCounters& MemoryCounters::getInstance()
-{
-    static MemoryCounters mInstance;
-    return mInstance;
 }
 } // namespace tensorrt_llm::runtime

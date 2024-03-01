@@ -20,23 +20,24 @@ from itertools import product
 
 import numpy as np
 import pytest
+
+# isort: off
 import torch
+# isort: on
 from parameterized import parameterized
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import tensorrt_llm
 from tensorrt_llm import Builder
+from tensorrt_llm._utils import str_dtype_to_trt
 from tensorrt_llm.network import net_guard
 from tensorrt_llm.plugin.plugin import ContextFMHAType
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
-from examples.phi.convert_checkpoint import convert_hf_phi  # isort:skip
+from examples.phi.weight import load_from_hf_phi
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.util import getSMVersion
-
-# Fixed code revision or updated config can break the tests.
-HF_CODE_REVISION = "cb2f4533604d8b67de604e7df03bfe6f3ca22869"
 
 
 def compare_max_abs_error(ref, res, str):
@@ -49,91 +50,85 @@ def compare_max_abs_error(ref, res, str):
 
 class TestPhi(unittest.TestCase):
 
-    def setUp(self):
-        super().setUp()
-        # Fix random seed for the reproducibility.
-        torch.random.manual_seed(1773)
-
-    def generate_hf_model(self, dtype: str):
+    def _gen_hf_phi(self, hidden_act, n_layer, max_length, dtype):
         # Need to use the latest remote code for config and model class.
         gpt_config = AutoConfig.from_pretrained("microsoft/phi-2",
-                                                code_revision=HF_CODE_REVISION,
                                                 trust_remote_code=True)
-        gpt_config.num_hidden_layers = 2
-        model = AutoModelForCausalLM.from_config(
-            gpt_config, code_revision=HF_CODE_REVISION,
-            trust_remote_code=True).cuda().to(
-                tensorrt_llm._utils.str_dtype_to_torch(dtype)).eval()
-        return gpt_config, model
+        gpt_config.n_layer = n_layer
+        gpt_config.hidden_act = hidden_act
 
-    def initialize_network(self, network: tensorrt_llm.Network, hf_model,
-                           hf_config, dtype: str, batch_size: int,
-                           beam_width: int, input_len: int, output_len: int,
-                           tensor_parallel: int, rank: int):
-        config = {
-            'architecture': hf_config.architectures[0],
-            'dtype': dtype,
-            'num_hidden_layers': hf_config.num_hidden_layers,
-            'num_attention_heads': hf_config.num_key_value_heads,
-            'partial_rotary_factor': hf_config.partial_rotary_factor,
-            'rope_theta': hf_config.rope_theta,
-            'hidden_size': hf_config.hidden_size,
-            'intermediate_size': hf_config.intermediate_size,
-            'vocab_size': hf_config.vocab_size,
-            'max_position_embeddings': hf_config.max_position_embeddings,
-            'hidden_act': hf_config.hidden_act,
-            'quantization': {
-                'use_weight_only': False,
-                'weight_only_precision': False,
-            },
-            'mapping': {
-                'world_size': tensor_parallel,
-                'tp_size': tensor_parallel,
-            },
-            'use_parallel_embedding': False,
-            'embedding_sharding_dim': 0,
-            'share_embedding_table': False,
-        }
-        config = tensorrt_llm.models.PretrainedConfig.from_dict(config)
-        config.set_rank(rank)
-        weights = convert_hf_phi(hf_model,
-                                 rank=rank,
-                                 tensor_parallel=tensor_parallel,
-                                 dtype=dtype,
-                                 use_parallel_embedding=False,
-                                 sharding_dim=0)
-        trtllm_model = tensorrt_llm.models.PhiForCausalLM(config)
-        trtllm_model.load(weights)
+        hf_gpt = AutoModelForCausalLM.from_config(
+            gpt_config, trust_remote_code=True).cuda().to(
+                tensorrt_llm._utils.str_dtype_to_torch(dtype)).eval()
+        return gpt_config, hf_gpt
+
+    def _gen_tensorrt_llm_network(self, network, builder, hf_gpt, gpt_config,
+                                  batch_size, beam_width, input_len, output_len,
+                                  dtype, gpt_attention_plugin, rank,
+                                  tensor_parallel,
+                                  apply_query_key_layer_scaling):
+        num_layers = gpt_config.num_hidden_layers
+        num_heads = gpt_config.num_attention_heads
+        hidden_size = gpt_config.hidden_size
+        vocab_size = gpt_config.vocab_size
+        hidden_act = gpt_config.hidden_act
+        max_position_embeddings = gpt_config.max_position_embeddings
+        rotary_dim = gpt_config.rotary_dim
+
+        list(range(tensor_parallel))
 
         with net_guard(network):
+            kv_dtype = str_dtype_to_trt(dtype)
             # Initialize model
-            network.set_named_parameters(trtllm_model.named_parameters())
-            inputs = trtllm_model.prepare_inputs(batch_size,
-                                                 input_len,
-                                                 input_len + output_len,
-                                                 use_cache=True,
-                                                 max_beam_width=beam_width)
-            # Prepare
-            trtllm_model(**inputs)
+            tensorrt_llm_gpt = tensorrt_llm.models.PhiForCausalLM(
+                num_layers=num_layers,
+                num_heads=num_heads,
+                hidden_size=hidden_size,
+                vocab_size=vocab_size,
+                hidden_act=hidden_act,
+                max_position_embeddings=max_position_embeddings,
+                rotary_dim=rotary_dim,
+                dtype=kv_dtype,
+                mapping=tensorrt_llm.Mapping(world_size=tensor_parallel,
+                                             tp_size=tensor_parallel),
+                apply_query_key_layer_scaling=apply_query_key_layer_scaling)
+            inputs = tensorrt_llm_gpt.prepare_inputs(batch_size,
+                                                     input_len,
+                                                     output_len,
+                                                     use_cache=True,
+                                                     max_beam_width=beam_width)
 
-    def generate_trtllm_runtime(self,
-                                log_level,
-                                dtype,
-                                world_size,
-                                rank,
-                                hf_config,
-                                hf_model,
-                                model,
-                                use_attention_plugin,
-                                batch_size,
-                                beam_width,
-                                input_len,
-                                output_len,
-                                use_refit,
-                                use_ln_gemm_plugin,
-                                apply_query_key_layer_scaling,
-                                context_fmha_flag=ContextFMHAType.disabled,
-                                enable_remove_input_padding=False):
+            load_from_hf_phi(tensorrt_llm_gpt,
+                             hf_gpt,
+                             dtype=dtype,
+                             rank=rank,
+                             tp_size=tensor_parallel)
+
+            # Prepare
+            network.set_named_parameters(tensorrt_llm_gpt.named_parameters())
+
+            tensorrt_llm_gpt(*inputs)
+
+        return network
+
+    def _gen_tensorrt_llm_runtime(self,
+                                  log_level,
+                                  dtype,
+                                  world_size,
+                                  rank,
+                                  gpt_config,
+                                  hf_gpt,
+                                  model,
+                                  use_attention_plugin,
+                                  batch_size,
+                                  beam_width,
+                                  input_len,
+                                  output_len,
+                                  use_refit,
+                                  use_ln_gemm_plugin,
+                                  apply_query_key_layer_scaling,
+                                  context_fmha_flag=ContextFMHAType.disabled,
+                                  enable_remove_input_padding=False):
         tensorrt_llm.logger.set_level('error')
         mapping = tensorrt_llm.Mapping(world_size, rank, tp_size=world_size)
 
@@ -151,7 +146,6 @@ class TestPhi(unittest.TestCase):
                 strongly_typed=fp16,
             )
             network = builder.create_network()
-            network.plugin_config.to_legacy_setting()
             if use_attention_plugin:
                 network.plugin_config.set_gpt_attention_plugin(dtype)
             if use_ln_gemm_plugin:
@@ -160,9 +154,12 @@ class TestPhi(unittest.TestCase):
                 network.plugin_config.enable_remove_input_padding()
             network.plugin_config.set_context_fmha(context_fmha_flag)
 
-            self.initialize_network(network, hf_model, hf_config, dtype,
-                                    batch_size, beam_width, input_len,
-                                    output_len, world_size, rank)
+            self._gen_tensorrt_llm_network(network, builder, hf_gpt, gpt_config,
+                                           batch_size, beam_width, input_len,
+                                           output_len, dtype,
+                                           use_attention_plugin, rank,
+                                           world_size,
+                                           apply_query_key_layer_scaling)
 
             engine_buffer = builder.build_engine(network, builder_config)
             runtime = tensorrt_llm.runtime.generation._Runtime(
@@ -181,11 +178,15 @@ class TestPhi(unittest.TestCase):
         return test_cases
 
     @parameterized.expand(load_test_cases)
-    def test_phi(self, context_fmha_flag, enable_remove_input_padding):
+    def test_phi_plugin(self, context_fmha_flag, enable_remove_input_padding):
 
         # Skip tests that are not supported in pre-ampere architecture
         if getSMVersion() < 80:
-            if context_fmha_flag == ContextFMHAType.enabled_with_fp32_acc:
+            if context_fmha_flag == ContextFMHAType.enabled:
+                pytest.skip(
+                    "ContextFMHAType is not supported in pre-ampere architecture"
+                )
+            elif context_fmha_flag == ContextFMHAType.enabled_with_fp32_acc:
                 pytest.skip(
                     "ContextFMHAType with fp32 acc is not supported in pre-ampere architecture"
                 )
@@ -199,6 +200,8 @@ class TestPhi(unittest.TestCase):
         dtype = 'float16'
         world_size = 1
         rank = 0
+        hidden_act = 'gelu'
+        n_layer = 6
         max_length = 128
         batch_size = 1
         beam_width = 1
@@ -207,8 +210,9 @@ class TestPhi(unittest.TestCase):
         use_attention_plugin = True
         use_ln_gemm_plugin = True
 
-        gpt_config, hf_gpt = self.generate_hf_model(dtype)
-        runtime, _ = self.generate_trtllm_runtime(
+        gpt_config, hf_gpt = self._gen_hf_phi(hidden_act, n_layer,
+                                              seq_len + max_length, dtype)
+        runtime, _ = self._gen_tensorrt_llm_runtime(
             log_level, dtype, world_size, rank, gpt_config, hf_gpt, model,
             use_attention_plugin, batch_size, beam_width, seq_len, max_length,
             use_refit, use_ln_gemm_plugin, apply_query_key_layer_scaling,
@@ -286,14 +290,13 @@ class TestPhi(unittest.TestCase):
         ctx_shape = {k: v.shape for k, v in ctx_buffer.items()}
         shape = (batch_size, 2, gpt_config.num_attention_heads, total_seq_len,
                  gpt_config.hidden_size // gpt_config.num_attention_heads)
-        ctx_buffer[f'host_max_attention_window_sizes'] = torch.tensor(
-            [total_seq_len] * gpt_config.num_hidden_layers, dtype=torch.int32)
-        ctx_shape[f'host_max_attention_window_sizes'] = (
-            gpt_config.num_hidden_layers, )
         for i in range(gpt_config.num_hidden_layers):
             ctx_shape[f'past_key_value_{i}'] = shape
             ctx_buffer[f'past_key_value_{i}'] = key_value_cache_buffers[i]
             ctx_buffer[f'present_key_value_{i}'] = key_value_cache_buffers[i]
+            ctx_buffer[f'host_max_attention_window_size_{i}'] = torch.tensor(
+                [total_seq_len], dtype=torch.int32)
+            ctx_shape[f'host_max_attention_window_size_{i}'] = (1, )
         ctx_buffer['sequence_length'] = sequence_length_buffer
         sequence_length_buffer = torch.add(sequence_length_buffer, step)
         ctx_shape['sequence_length'] = ctx_buffer['sequence_length'].shape
@@ -317,6 +320,8 @@ class TestPhi(unittest.TestCase):
                                    atol=1e-1)
 
         compare_max_abs_error(ref, res, "context logits")
+
+        v_inner = 16 // (2 if dtype == 'float16' else 4)
 
         # compare generation
         step = 1
@@ -351,18 +356,17 @@ class TestPhi(unittest.TestCase):
         if enable_remove_input_padding:
             step1_buffer['host_context_lengths'] = gen_context_lengths.cpu()
         step1_shape = {k: v.shape for k, v in step1_buffer.items()}
-        step1_shape[f'host_max_attention_window_sizes'] = (
-            gpt_config.num_hidden_layers, )
         for i in range(gpt_config.num_hidden_layers):
             step1_shape[f'past_key_value_{i}'] = shape
+            step1_shape[f'host_max_attention_window_size_{i}'] = (1, )
         step1_shape['sequence_length'] = (batch_size, )
         step1_shape['host_past_key_value_lengths'] = (batch_size, )
         step1_shape['host_sink_token_length'] = (1, )
-        step1_buffer[f'host_max_attention_window_sizes'] = torch.tensor(
-            [total_seq_len] * gpt_config.num_hidden_layers, dtype=torch.int32)
         for i in range(gpt_config.num_hidden_layers):
             step1_buffer[f'past_key_value_{i}'] = key_value_cache_buffers[i]
             step1_buffer[f'present_key_value_{i}'] = key_value_cache_buffers[i]
+            step1_buffer[f'host_max_attention_window_size_{i}'] = torch.tensor(
+                [total_seq_len], dtype=torch.int32)
         # For step 1, the sequence_lengths = context_lengths + 1.
         sequence_length_buffer = torch.add(sequence_length_buffer, step)
         step1_buffer['sequence_length'] = sequence_length_buffer

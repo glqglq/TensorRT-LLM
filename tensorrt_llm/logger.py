@@ -14,7 +14,6 @@
 # limitations under the License.
 import logging
 import os
-import sys
 
 import tensorrt as trt
 
@@ -56,8 +55,7 @@ class Logger(metaclass=Singleton):
         self._trt_logger = trt.Logger(severity_map[min_severity][0])
         logging.basicConfig(level=severity_map[min_severity][1],
                             format='[%(asctime)s] %(message)s',
-                            datefmt='%m/%d/%Y-%H:%M:%S',
-                            stream=sys.stdout)
+                            datefmt='%m/%d/%Y-%H:%M:%S')
         self._logger = logging.getLogger('TRT-LLM')
         self._polygraphy_logger = G_LOGGER
         if self._polygraphy_logger is not None:

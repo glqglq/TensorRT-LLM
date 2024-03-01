@@ -23,6 +23,8 @@
 #include <ATen/ATen.h>
 #include <torch/types.h>
 
+#include <memory>
+
 namespace tensorrt_llm::runtime
 {
 class TorchView : virtual public ITensor

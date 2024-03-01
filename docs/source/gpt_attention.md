@@ -100,28 +100,6 @@ memory is not enough when multi-block mode is not enabled. To get masked MHA
 kernel work in these cases, multi-block mode is forced on and a warning log is
 printed.
 
-#### XQA Optimization
-
-Another optimization for MQA/GQA in generation phase called XQA optimization.
-It is still experimental feature and support limited configurations. LLAMA2 70B
-is one model that it supports.
-
-Support matrix of the XQA optimization:
- - FP16 / BF16 compute data type.
- - FP16 / BF16 / FP8 / INT8 KV cache data type.
- - Paged KV cache (64 / 128 tokens per block).
-
-This is default enabled. To disable this, you need to use the
-flag `--disable_xqa` when building the engines. Note that a heuristic algorithm
-is also used to decide whether to use XQA kernel or masked MHA kernel to get
-better performance. That means even `--disable_xqa` is not set, XQA kernels
-may not also be used. If you want to always use that kernel when possible,
-`TRTLLM_FORCE_XQA=1` can be set to force use XQA kernels when the model config
-is supported. Detailed supported configuration can be found function `shouldUse`
-of class `DecoderXQARunner` in
-`cpp/tensorrt_llm/kernels/decoderMaskedMultiheadAttention/decoderXQARunner.h`.
-
-
 ## Inflight batching
 
 TensorRT-LLM supports a feature called in-flight batching. With that feature,
@@ -140,17 +118,6 @@ be relaxed in a future version.
 
 _(1) Padding sequences in the generation phase, that contain a single token, to
 the length of the maximum input sequence is inefficient use of resources_.
-
-## Chunked Context
-
-In the original state, the common behavior was to process all context tokens at
-once. This feature splits the context into several chunks. In this way, the
-context chunks can be batched with more tokens during the generation phase,
-which is expected to increase the total throughput. Chunking contexts also removes
-constraints on input length. To enable this feature, the FMHA paged kv-cache also
-needs to be enabled. Except for the last one, the size of the context chunk needs
-to be an integer multiple of the kv-cache block size. Please refer to
-[the performance best practices](perf_best_practices.md#chunked-context) for usage.
 
 ## KV Cache(s)
 
@@ -195,13 +162,13 @@ outputs. However, TensorRT-LLM supports INT8 and FP8
 The GPT attention operator populates the KV cache. When INT8 or FP8 KV caches
 are enabled, the input values have to be quantized to 8 bits using a scaling
 factor. For quantization, the scaling factor is stored in the
-`kv_cache_scaling_factor` tensor. Its shape is `[1]` and only per-tensor
-quantization is supported in the current version. Quantization uses inversed scale
-since it does multiply as `fp_value * (1.0 / kv_cache_scaling_factor)` in plugin.
+`kv_orig_quant_scale` tensor. Its shape is `[1]` and only per-tensor
+quantization is supported in the current version.
 
 During generation, the values read from the cache are dequantized on-the-fly in
-the MHA/MQA kernel, dequantization can be described as
-`quantized_value * kv_cache_scaling_factor`.
+the MHA/MQA kernel. The scaling factor to dequantize those values is stored in
+the `kv_quant_orig_scale` tensor. That tensor contains a single value (per
+tensor scaling).
 
 
 ## Sliding Window Attention, Cyclic (Rolling Buffer) KV Cache

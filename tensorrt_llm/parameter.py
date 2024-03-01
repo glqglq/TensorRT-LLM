@@ -43,7 +43,7 @@ class Parameter:
         dtype = self._DEFAULT_DTYPE if dtype is None else dtype
         if isinstance(dtype, str):
             dtype = str_dtype_to_trt(dtype)
-        self._dtype: trt.DataType = dtype
+        self._dtype = dtype
         if value is None:
             assert isinstance(shape, (list, tuple))
             self._shape = tuple(shape)
@@ -83,24 +83,16 @@ class Parameter:
                                   upper, (shape),
                                   dtype=trt_dtype_to_torch(dtype),
                                   device='cuda')
-            # value ~ U[int(-128 * v_range), int(128 * v_range)]
-        elif dtype == trt.DataType.FP8:
-            value = torch.randn((shape), device='cuda') * 2 - 1
-            # value ~ N[-v_range, v_range]
-            value = value * v_range
-            value = value.to(trt_dtype_to_torch(dtype))
+            # value ~ U[int(-128 * v_range), int(128 * v_range)]
         else:
             value = torch.randn(
                 (shape), dtype=trt_dtype_to_torch(dtype), device='cuda') * 2 - 1
-            # value ~ N[-v_range, v_range]
+            # value ~ N[-v_range, v_range]
             value = value * v_range
 
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             copy_torch_to_numpy(value, weights)
-
-    def is_inited(self) -> bool:
-        return self._value is not None
 
     @property
     def raw_value(self) -> np.ndarray:
@@ -120,10 +112,9 @@ class Parameter:
         assert v.shape == self._shape, \
             f'The value updated is not the same shape as the original. ' \
             f'Updated: {v.shape}, original: {self._shape}'
-        dtype = np_dtype_to_trt(v.dtype)
-        if self._dtype != dtype:
+        if self._dtype != v.dtype:
             logger.warning(
-                f"Parameter was initialized as {self._dtype} but set to {dtype}"
+                f"Parameter was initialized as {self._dtype} but set to {v.dtype}"
             )
         self._value = v
 

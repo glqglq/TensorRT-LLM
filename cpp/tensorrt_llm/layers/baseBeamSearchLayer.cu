@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,9 @@
 
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/memoryUtils.h"
+#include "tensorrt_llm/kernels/beamSearchPenaltyKernels.h"
 #include "tensorrt_llm/layers/baseBeamSearchLayer.h"
+#include "tensorrt_llm/layers/fillBuffers.h"
 
 #include <algorithm>
 
@@ -79,9 +81,9 @@ void update_indir_cache_kernelLauncher(int* tgt_indir_cache, const int* src_indi
 }
 
 template <typename T>
-BaseBeamSearchLayer<T>::BaseBeamSearchLayer(
-    size_t vocab_size, size_t vocab_size_padded, cudaStream_t stream, std::shared_ptr<IAllocator> allocator)
-    : BaseLayer(stream, std::move(allocator), nullptr)
+BaseBeamSearchLayer<T>::BaseBeamSearchLayer(size_t vocab_size, size_t vocab_size_padded, cudaStream_t stream,
+    std::shared_ptr<IAllocator> allocator, bool is_free_buffer_after_forward)
+    : BaseLayer(stream, std::move(allocator), is_free_buffer_after_forward, nullptr)
     , vocab_size_(vocab_size)
     , vocab_size_padded_(vocab_size_padded)
 {
@@ -107,9 +109,14 @@ template <typename T>
 void BaseBeamSearchLayer<T>::freeBuffer()
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    if (mIsAllocateBuffer)
+    if (is_allocate_buffer_)
     {
-        mIsAllocateBuffer = false;
+        allocator_->free((void**) (&temperature_buf_));
+        allocator_->free((void**) (&min_lengths_buf_));
+        allocator_->free((void**) (&repetition_penalty_buf_));
+        allocator_->free((void**) (&presence_penalty_buf_));
+        allocator_->free((void**) (&frequency_penalty_buf_));
+        is_allocate_buffer_ = false;
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -118,15 +125,45 @@ template <typename T>
 void BaseBeamSearchLayer<T>::allocateBuffer(size_t batch_size)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    mIsAllocateBuffer = true;
+    temperature_buf_ = allocator_->reMalloc(temperature_buf_, sizeof(float) * batch_size, false);
+    min_lengths_buf_ = allocator_->reMalloc(min_lengths_buf_, sizeof(int) * batch_size, false);
+    repetition_penalty_buf_ = allocator_->reMalloc(repetition_penalty_buf_, sizeof(float) * batch_size, false);
+    presence_penalty_buf_ = allocator_->reMalloc(presence_penalty_buf_, sizeof(float) * batch_size, false);
+    frequency_penalty_buf_ = allocator_->reMalloc(frequency_penalty_buf_, sizeof(float) * batch_size, false);
+
+    is_allocate_buffer_ = true;
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
 template <typename T>
 void BaseBeamSearchLayer<T>::setupBase(size_t batch_size, SetupParams const& setupParams)
 {
-    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     allocateBuffer(batch_size);
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    // Setup penalties.
+    FillBuffers const fillBuffers{batch_size, stream_};
+
+    fillBuffers(setupParams.temperature, 1.0f, mTemperature, temperature_buf_);
+    fillBuffers(setupParams.min_length, 1, mMinLength, min_lengths_buf_);
+
+    use_repetition_penalty_ = static_cast<bool>(setupParams.repetition_penalty);
+    use_presence_penalty_ = static_cast<bool>(setupParams.presence_penalty);
+    use_frequency_penalty_ = static_cast<bool>(setupParams.frequency_penalty);
+    if (use_repetition_penalty_)
+    {
+        fillBuffers(setupParams.repetition_penalty, getDefaultPenaltyValue(RepetitionPenaltyType::Repetition),
+            mRepetitionPenalty, repetition_penalty_buf_);
+    }
+    if (use_presence_penalty_)
+    {
+        fillBuffers(setupParams.presence_penalty, getDefaultPenaltyValue(RepetitionPenaltyType::Presence),
+            mPresencePenalty, presence_penalty_buf_);
+    }
+    if (use_frequency_penalty_)
+    {
+        fillBuffers(setupParams.frequency_penalty, getDefaultPenaltyValue(RepetitionPenaltyType::Frequency),
+            mFrequencyPenalty, frequency_penalty_buf_);
+    }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -142,14 +179,25 @@ void BaseBeamSearchLayer<T>::forward(BeamSearchOutputParams& outputs, ForwardPar
 
     TLLM_CHECK_WITH_INFO(params.ite == 0, "Pipeline Parallelism is not supported yet !");
 
-    const int ite = params.ite;
-    auto* const input_lengths = params.input_lengths ? params.input_lengths->template getPtr<const int>() : nullptr;
-    int* sequence_length = (outputs.sequence_length) ? outputs.sequence_length->template getPtr<int>() : nullptr;
+    const int ite{params.ite};
     Tensor const& logits = params.logits;
     const auto local_batch_size = logits.shape[0];
 
-    invokeSoftMax(outputs, params);
+    const T* embedding_bias = params.embedding_bias ? params.embedding_bias->template getPtr<const T>() : nullptr;
+
+    auto* end_ids = params.end_ids.template getPtr<const int>();
+    auto* const input_lengths = params.input_lengths ? params.input_lengths->template getPtr<const int>() : nullptr;
+    int* sequence_length = (outputs.sequence_length) ? outputs.sequence_length->template getPtr<int>() : nullptr;
+
+    invokeAddBiasApplyPenalties(logits.getPtr<T>(), output_ids_ptr.template getPtr<const int*>(),
+        outputs.parent_ids_ptr.template getPtr<const int*>(), input_lengths, sequence_length, embedding_bias, ite,
+        local_batch_size, batch_size, beam_width, vocab_size_, vocab_size_padded_, end_ids, temperature_buf_,
+        mTemperature, repetition_penalty_buf_, presence_penalty_buf_, frequency_penalty_buf_, mRepetitionPenalty,
+        mPresencePenalty, mFrequencyPenalty, use_repetition_penalty_, use_presence_penalty_, use_frequency_penalty_,
+        min_lengths_buf_, max_seq_len, stream_);
     sync_check_cuda_error();
+
+    invokeSoftMax(outputs, params);
 
     if (beam_width > 1)
     {
@@ -159,9 +207,15 @@ void BaseBeamSearchLayer<T>::forward(BeamSearchOutputParams& outputs, ForwardPar
             reinterpret_cast<const FinishedState*>(
                 outputs.finished->template getPtr<const FinishedState::UnderlyingType>()),
             sequence_length, input_lengths, batch_size, local_batch_size, beam_width, max_seq_len,
-            params.max_attention_window, params.sink_token_length, mStream);
+            params.max_attention_window, params.sink_token_length, stream_);
         sync_check_cuda_error();
     }
+    sync_check_cuda_error();
+    if (is_free_buffer_after_forward_)
+    {
+        freeBuffer();
+    }
+    sync_check_cuda_error();
 }
 
 template class BaseBeamSearchLayer<float>;

@@ -117,21 +117,6 @@ When using V1 batching, the following additional statistics are reported per V1 
   * `Total Context Tokens`, total number of tokens across requests in context phase
   * `Empty Generation Slots`, total number of padded Slots during generation phase
 
-### Logits Post-Processor (optional)
-
-Users can alter the logits produced the network, with a callback attached to an `InferenceRequest`:
-
-```
-  using LogitsPostProcessor = std::function<TensorPtr(RequestIdType, TensorPtr&, BeamTokens const&, TStream)>;
-```
-
-The first argument is the request id, second is the logits tensor, third are the tokens produced by the request so far, and last one is the operation stream used by the logits tensor.
-
-Users *must* use the stream to access the logits tensor. For example, performing a addition with a bias tensor should be enqueued on that stream.
-Alternatively, users may call `stream->synchronize()`, however, that will slow down the entire execution pipeline.
-
-Note: this feature isn't supported with the `V1` batching scheme for the moment.
-
 ### Other mandatory GptManager parameters
 * `trtEnginePath`, path to the directory containing the TRT-LLM engine that GptManager wraps
 * `modelType`, batching scheme - V1, InflightBatching or InflightFusedBatching.
@@ -148,21 +133,10 @@ Note: this feature isn't supported with the `V1` batching scheme for the moment.
   - `kvCacheConfig`
     - `maxTokens` (default: unspecified) refers to the maximum number of tokens reserved for KV cache across all requests. If specified, the final allocated KV cache considers this parameter as well as `freeGpuMemoryFraction` below.
     - `maxAttentionWindow` (default: unspecified) refers to the maximum number of tokens attended to in the model when using features like sliding window attention or StreamingLLM. If unspecified, each generated tokens attends to all previous tokens like traditional MHA or MQA.
-    - `freeGpuMemoryFraction` (default: 0.9) a number between 0 and 1 to indicate the maximum fraction of GPU memory (after loading the model) that may be used for KV cache. If `maxTokens` is specified, allocated KV cache is the minimum of `maxTokens` and the value inferred from `freeGpuMemoryFraction`.
+    - `freeGpuMemoryFraction` (default: 0.85) a number between 0 and 1 to indicate the maximum fraction of GPU memory (after loading the model) that may be used for KV cache. If `maxTokens` is specified, allocated KV cache is the minimum of `maxTokens` and the value inferred from `freeGpuMemoryFraction`.
     - `enableBlockReuse` (default: `false`) allow reuse of previously computed KV cache blocks across requests. This is expected to optimize memory use and computation.
-  - `enableTrtOverlap` (default: `false`) when `true`, GptManager partitions available requests into 2 'microbatches' that can be run concurrently to hide exposed CPU runtime. However, it may not give performance benefits when the size of the model is not big enough to overlap the host overhead, or when the number of requests is too small.
-  - `enableChunkedContext` (default: `false`) Whether to enable context chunking. Context chunking increases the possibility of batching the context and generation phases, which in turn improves performance. When set to `false`, it indicates that the context chunk is disabled.
-
-### Responses content
-The responses from `SendResponseCallback` are stored in a `std::shared_ptr<Tensor>` list, which contains the following tensors of a specific request:
-* output Ids: a CPU tensor that contains the output token IDs. Its shape is
-[1, beamWidth, maxSeqLength].
-* sequence length: a CPU tensor that indicates the length of inputID + outputID. Its shape is [1, 1].
-* context logits: a CPU tensor that contains context logits. Its shape is [1, promptLength, vocabSizePadded] if the engine is built with `gather_context_logits` or `gather_all_token_logits`. Otherwise, it is a dummy tensor with shape [1, 1, 1].
-* generation logits:  a CPU tensor that contains generation logits. Its shape is [1, beamWidth, outputLength, vocabSizePadded]. if the engine is built with `gather_generation_logits` or `gather_all_token_logits`. Otherwise, it is a dummy tensor with shape [1, 1, 1, 1]. If you are using gptManagerBenchmark.cpp, please remember to pass corresponding parameters `--return-context-logits` and/or `--return-generation-logits` to obtain these logits. Note that enabling return logits will require more device memory for converting and storing logits. To reduce redundant memory buffer allocation as much as possible, we recommend that the `max_batch_size`, `max_beam_width`, `max_input_len`, `max_output_len`, and other parameters set when building the engine are close to the values required during actual inference.
-
-* logProb: a CPU tensor that stores the log-prob of the generated tokens. Its shape is [1, beamWidth, outputLength]
-* cumLogProb: a CPU tensor that stores the cumLogProb. Its shape is [1, beamWidth]
+  - `maxNumSequences` (default: unspecified) maximum number of sequences that can be in progress in any iteration. It is recommended that this value be left unspecified and the value will be inferred from the TRT-LLM engine.
+  - `enableTrtOverlap` (default: `true`) when `true`, GptManager partitions available requests into 2 'microbatches' that can be run concurrently to hide exposed CPU runtime.
 
 ### GptManager Design
 

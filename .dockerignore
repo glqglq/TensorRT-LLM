@@ -1,7 +1,5 @@
 build
 cpp/*build*
-cpp/cmake-*
-cpp/.ccache
 cpp/tests/resources/models
 tensorrt_llm/libs
 **/__pycache__

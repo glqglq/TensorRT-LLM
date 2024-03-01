@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include "tensorrt_llm/common/tensor.h"
 #include "tensorrt_llm/kernels/beamSearchTopkKernels.h"
 #include "tensorrt_llm/kernels/decodingCommon.h"
+#include "tensorrt_llm/kernels/penaltyTypes.h"
 #include "tensorrt_llm/layers/baseLayer.h"
 #include "tensorrt_llm/layers/decodingParams.h"
 
@@ -42,8 +43,8 @@ class BaseBeamSearchLayer : public BaseLayer
 public:
     using SetupParams = DecodingSetupParams;
 
-    BaseBeamSearchLayer(
-        size_t vocab_size, size_t vocab_size_padded, cudaStream_t stream, std::shared_ptr<tc::IAllocator> allocator);
+    BaseBeamSearchLayer(size_t vocab_size, size_t vocab_size_padded, cudaStream_t stream,
+        std::shared_ptr<tc::IAllocator> allocator, bool is_free_buffer_after_forward);
 
     BaseBeamSearchLayer(BaseBeamSearchLayer<T> const& beam_search_layer);
 
@@ -71,7 +72,8 @@ public:
         tc::Tensor src_cache_indirection; // [local_batch_size, beam_width, max_seq_len]
 
         // optional parameters
-        std::optional<tc::Tensor> input_lengths; // [local_batch_size * beam_width]
+        std::optional<tc::Tensor> embedding_bias; // [vocab_size_padded]
+        std::optional<tc::Tensor> input_lengths;  // [local_batch_size * beam_width]
     };
 
     class BeamSearchOutputParams : public DecodingOutputParams
@@ -103,6 +105,20 @@ protected:
 
     size_t topk_softmax_workspace_size_;
     void* topk_softmax_workspace_ = nullptr;
+
+    std::vector<float> mTemperature;
+    std::vector<int> mMinLength;
+    std::vector<float> mRepetitionPenalty;
+    std::vector<float> mPresencePenalty;
+    std::vector<float> mFrequencyPenalty;
+    float* temperature_buf_;
+    int* min_lengths_buf_;
+    float* repetition_penalty_buf_;
+    float* presence_penalty_buf_;
+    float* frequency_penalty_buf_;
+    bool use_repetition_penalty_ = false;
+    bool use_presence_penalty_ = false;
+    bool use_frequency_penalty_ = false;
 
     virtual void invokeSoftMax(BeamSearchOutputParams& outputs, SoftmaxParams const& params) = 0;
 

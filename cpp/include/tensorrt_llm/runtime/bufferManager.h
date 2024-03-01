@@ -22,7 +22,9 @@
 #include "tensorrt_llm/runtime/iTensor.h"
 #include <NvInferRuntime.h>
 
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -63,18 +65,6 @@ public:
 
     //! \brief Allocates a pinned `ITensor` of the given dimensions on the CPU.
     [[nodiscard]] static ITensorPtr pinned(nvinfer1::Dims dims, nvinfer1::DataType type = kBYTE_TYPE);
-
-    //! \brief Allocates a pinned `IBuffer` of the given size on the CPU in the default memory pool.
-    [[nodiscard]] static IBufferPtr pinnedPool(std::size_t size, nvinfer1::DataType type = kBYTE_TYPE);
-
-    //! \brief Allocates a pinned `ITensor` of the given dimensions on the CPU in the default memory pool.
-    [[nodiscard]] static ITensorPtr pinnedPool(nvinfer1::Dims dims, nvinfer1::DataType type = kBYTE_TYPE);
-
-    //! \brief Allocates an `IBuffer` of the given size in UVM.
-    [[nodiscard]] static IBufferPtr managed(std::size_t size, nvinfer1::DataType type = kBYTE_TYPE);
-
-    //! \brief Allocates an `ITensor` of the given dimensions in UVM.
-    [[nodiscard]] static ITensorPtr managed(nvinfer1::Dims dims, nvinfer1::DataType type = kBYTE_TYPE);
 
     //! \brief Allocates an `IBuffer` of the given size and memory type.
     [[nodiscard]] IBufferPtr allocate(

@@ -18,17 +18,8 @@ set_property(TARGET th_utils PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 target_link_libraries(th_utils PUBLIC ${TORCH_LIBRARIES} ${CUBLAS_LIB}
                                       ${CURAND_LIB})
 
-add_library(
-  th_common SHARED
-  dynamicDecodeOp.cpp weightOnlyQuantOp.cpp gatherTreeOp.cpp fp8Op.cpp
-  ncclCommunicatorOp.cpp parallelDecodeKVCacheUpdateOp.cpp)
+add_library(th_common SHARED dynamicDecodeOp.cpp weightOnlyQuantOp.cpp
+                             gatherTreeOp.cpp fp8Op.cpp ncclCommunicatorOp.cpp)
 set_property(TARGET th_common PROPERTY POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(th_common PRIVATE ${TORCH_LIBRARIES} th_utils
-                                        ${Python3_LIBRARIES} ${SHARED_TARGET})
-
-if(NOT WIN32)
-  set_target_properties(
-    th_common
-    PROPERTIES LINK_FLAGS
-               "-Wl,-rpath='$ORIGIN' ${AS_NEEDED_FLAG} ${UNDEFINED_FLAG}")
-endif()
+                                        ${Python3_LIBRARIES} ${STATIC_TARGET})

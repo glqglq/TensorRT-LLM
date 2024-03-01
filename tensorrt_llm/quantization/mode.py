@@ -14,19 +14,6 @@
 # limitations under the License.
 from enum import IntFlag, auto
 
-W8A16 = 'W8A16'
-W4A16 = 'W4A16'
-W4A16_AWQ = 'W4A16_AWQ'
-W4A8_AWQ = 'W4A8_AWQ'
-W4A16_GPTQ = 'W4A16_GPTQ'
-W8A8_SQ_PER_CHANNEL = 'W8A8_SQ_PER_CHANNEL'
-W8A8_SQ_PER_TENSOR_PLUGIN = 'W8A8_SQ_PER_TENSOR_PLUGIN'
-W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN = 'W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN'  # nosec
-W8A8_SQ_PER_CHANNEL_PER_TENSOR_PLUGIN = 'W8A8_SQ_PER_CHANNEL_PER_TENSOR_PLUGIN'  # nosec
-W8A8_SQ_PER_TENSOR_PER_TOKEN_PLUGIN = 'W8A8_SQ_PER_TENSOR_PER_TOKEN_PLUGIN'  # nosec
-FP8 = 'FP8'
-INT8 = 'INT8'
-
 
 class QuantMode(IntFlag):
     # [WARNING] KEEP BELOW DEFINITION IN SYNC WITH cpp/tensorrt_llm/common/quantization.h
@@ -111,8 +98,7 @@ class QuantMode(IntFlag):
         return self._any(self.FP8_QDQ)
 
     def has_any_quant(self):
-        return self._any(self.INT4_WEIGHTS | self.INT8_WEIGHTS
-                         | self.ACTIVATIONS
+        return self._any(self.INT8_WEIGHTS | self.ACTIVATIONS
                          | self.INT8_KV_CACHE | self.FP8_KV_CACHE
                          | self.FP8_QDQ)
 
@@ -195,74 +181,10 @@ class QuantMode(IntFlag):
         return QuantMode.from_description(True, True, per_token, per_channel)
 
     @staticmethod
-    def use_weight_only(use_int4_weights=False, per_group=False):
+    def use_weight_only(use_int4_weights=False):
         return QuantMode.from_description(quantize_weights=True,
                                           quantize_activations=False,
                                           per_token=False,
                                           per_channel=False,
-                                          per_group=per_group,
+                                          per_group=False,
                                           use_int4_weights=use_int4_weights)
-
-    @staticmethod
-    def from_quant_algo(quant_algo, kv_cache_quant_algo=None):
-        if quant_algo == W8A16:
-            quant_mode = QuantMode.use_weight_only(use_int4_weights=False)
-        elif quant_algo == W4A16:
-            quant_mode = QuantMode.use_weight_only(use_int4_weights=True)
-        elif quant_algo == W4A16_AWQ:
-            quant_mode = QuantMode.use_weight_only(use_int4_weights=True,
-                                                   per_group=True)
-        elif quant_algo == W4A8_AWQ:
-            quant_mode = QuantMode.use_weight_only(use_int4_weights=True,
-                                                   per_group=True)
-        elif quant_algo == W4A16_GPTQ:
-            quant_mode = QuantMode.use_weight_only(use_int4_weights=True,
-                                                   per_group=True)
-        elif quant_algo == W8A8_SQ_PER_CHANNEL:
-            quant_mode = QuantMode.use_smooth_quant(per_token=False,
-                                                    per_channel=True)
-        elif quant_algo == W8A8_SQ_PER_TENSOR_PLUGIN:
-            quant_mode = QuantMode.use_smooth_quant(per_token=False,
-                                                    per_channel=False)
-        elif quant_algo == W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN:
-            quant_mode = QuantMode.use_smooth_quant(per_token=True,
-                                                    per_channel=True)
-        elif quant_algo == W8A8_SQ_PER_CHANNEL_PER_TENSOR_PLUGIN:
-            quant_mode = QuantMode.use_smooth_quant(per_token=False,
-                                                    per_channel=True)
-        elif quant_algo == W8A8_SQ_PER_TENSOR_PER_TOKEN_PLUGIN:
-            quant_mode = QuantMode.use_smooth_quant(per_token=True,
-                                                    per_channel=False)
-        elif quant_algo == FP8:
-            quant_mode = QuantMode.from_description(use_fp8_qdq=True)
-        else:
-            quant_mode = QuantMode(0)
-
-        if kv_cache_quant_algo == INT8:
-            quant_mode = quant_mode.set_int8_kv_cache()
-        elif kv_cache_quant_algo == FP8:
-            quant_mode = quant_mode.set_fp8_kv_cache()
-
-        return quant_mode
-
-    def to_dict(self):
-        return {
-            'use_smooth_quant':
-            self.has_act_and_weight_quant(),
-            'per_channel':
-            self.has_per_channel_scaling(),
-            'per_token':
-            self.has_per_token_dynamic_scaling(),
-            'per_group':
-            self.has_per_group_scaling(),
-            'int8_kv_cache':
-            self.has_int8_kv_cache(),
-            'enable_fp8':
-            self.has_fp8_qdq(),
-            'fp8_kv_cache':
-            self.has_fp8_kv_cache(),
-            'use_weight_only':
-            self.is_weight_only(),
-            'weight_only_precision':
-            'int8' if self.is_int8_weight_only() else 'int4',
-        }

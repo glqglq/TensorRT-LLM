@@ -19,11 +19,8 @@ import unittest
 
 import numpy as np
 import pytest
-
-# isort: off
-import torch
 import tensorrt as trt
-# isort: on
+import torch
 from parameterized import parameterized
 from polygraphy.backend.trt import CreateConfig, EngineFromNetwork, TrtRunner
 
@@ -48,12 +45,11 @@ def make_tuple(num_experts=4,
                bias=True,
                dtype='float32',
                weight_dtype=None,
-               norm_mode=MoeConfig.ExpertScaleNormalizationMode.NONE,
-               use_plugin=True):
+               norm_mode=MoeConfig.ExpertScaleNormalizationMode.NONE):
     if weight_dtype is None:
         weight_dtype = dtype
     return (num_experts, topk, hidden_size, num_sequences, sequence_length,
-            actfn, bias, dtype, weight_dtype, norm_mode, use_plugin)
+            actfn, bias, dtype, weight_dtype, norm_mode)
 
 
 def gen_uniform_weights(*args, **kwargs):
@@ -65,7 +61,7 @@ def quant_dequant(weights, quant_mode):
         return weights
     # use the test version `_symmetric_...` to get the non-interleaved weights
     type = torch.quint4x2 if quant_mode.is_int4_weight_only() else torch.int8
-    quant_weights, _, torch_weight_scales = torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(
+    quant_weights, _, torch_weight_scales = torch.ops.fastertransformer._symmetric_quantize_last_axis_of_batched_matrix(
         weights.T.cpu().contiguous(), type)
 
     # Unpack the int4s int int8s
@@ -122,7 +118,6 @@ class TestFunctional(unittest.TestCase):
         #  This causes a completely different output for the affected tokens. So we set the seed to prevent sporadic failures
         #  This shouldn't be a problem for most practical applications as it means the experts are equally good choices
         torch.manual_seed(0x766E)
-        tensorrt_llm.logger.set_level('error')
 
     def eye(self, shape, dtype, device='cuda'):
         """ Utility function for creating expert weights as an identity matrix for easy debugging """
@@ -140,46 +135,24 @@ class TestFunctional(unittest.TestCase):
                     params += [
                         make_tuple(num_experts=experts,
                                    topk=topk,
-                                   dtype='float16'),
+                                   dtype='float16')
                     ]
-        # OOTB test
-        for experts in [1, 4, 42]:
-            for topk in [1, 2, 3]:
-                if topk < experts:
-                    # TODO: Support ootb path with getSMVersion() < 90:
-                    if getSMVersion() >= 90:
-                        params += [
-                            make_tuple(num_experts=experts,
-                                       topk=topk,
-                                       dtype='float16',
-                                       use_plugin=False)
-                        ]
+
         for num_tokens in [1, 42, 100]:
             for sequence_length in [1, 3, 42]:
                 num_sequences = math.ceil(num_tokens / sequence_length)
                 params += [
                     make_tuple(num_sequences=num_sequences,
                                sequence_length=sequence_length,
-                               dtype='float16'),
+                               dtype='float16')
                 ]
-                if getSMVersion() >= 90:
-                    params += [
-                        make_tuple(num_sequences=num_sequences,
-                                   sequence_length=sequence_length,
-                                   dtype='float16',
-                                   use_plugin=False)
-                    ]
 
         # Add a test for float32
         params += [
+            make_tuple(dtype='float32'),
             # Try 5 because non-power 2 use a different topk kernel
-            make_tuple(num_experts=5, dtype='float32'),
+            make_tuple(num_experts=5, dtype='float32')
         ]
-        # TODO: Support ootb path with getSMVersion() < 90:
-        if getSMVersion() >= 90:
-            params += [
-                make_tuple(num_experts=5, dtype='float32', use_plugin=False)
-            ]
 
         # Add a test for bfloat16
         if getSMVersion() >= 80:
@@ -210,12 +183,6 @@ class TestFunctional(unittest.TestCase):
             if actfn == default_actfn:
                 continue  # Dont need to retest the one every other case uses
             params += [make_tuple(actfn=actfn, dtype='float16')]
-            # Test OOTB path with all activation function with float16
-            # TODO: Support ootb path with getSMVersion() < 90:
-            if getSMVersion() >= 90:
-                params += [
-                    make_tuple(actfn=actfn, dtype='float16', use_plugin=False)
-                ]
 
         # Test gated with all data types as it has a different path
         for actfn in ('swiglu', 'geglu'):
@@ -234,12 +201,9 @@ class TestFunctional(unittest.TestCase):
         # Test different k values for gated activations
         params += [
             make_tuple(actfn='geglu', topk=2, dtype='float16'),
+            make_tuple(actfn='geglu', topk=2, bias=False, dtype='float16')
         ]
-        # TODO: Support ootb path with getSMVersion() < 90:
-        if getSMVersion() >= 90:
-            params += [
-                make_tuple(actfn='geglu', topk=2, bias=False, dtype='float16')
-            ]
+
         # Test no bias
         params += [
             make_tuple(bias=False, dtype='float32'),
@@ -283,30 +247,6 @@ class TestFunctional(unittest.TestCase):
                 dtype='float16',
                 bias=False),
         ]
-
-        # Test OOTB renormalization
-        # TODO: Support ootb path with getSMVersion() < 90:
-        if getSMVersion() >= 90:
-            params += [
-                make_tuple(topk=2,
-                           dtype='float32',
-                           norm_mode=MoeConfig.ExpertScaleNormalizationMode.
-                           RENORMALIZE,
-                           use_plugin=False),
-                make_tuple(topk=2,
-                           dtype='float16',
-                           norm_mode=MoeConfig.ExpertScaleNormalizationMode.
-                           RENORMALIZE,
-                           use_plugin=False),
-                # Renorm affects the final accumulate, so sanity check with no bias too
-                make_tuple(norm_mode=MoeConfig.ExpertScaleNormalizationMode.
-                           RENORMALIZE,
-                           topk=2,
-                           dtype='float16',
-                           bias=False,
-                           use_plugin=False),
-            ]
-
         if getSMVersion() >= 80:
             params += [
                 make_tuple(dtype='bfloat16',
@@ -315,15 +255,6 @@ class TestFunctional(unittest.TestCase):
                            RENORMALIZE)
             ]
 
-        if getSMVersion() >= 90:
-            # TODO: Support ootb path with getSMVersion() < 90:
-            params += [
-                make_tuple(dtype='bfloat16',
-                           topk=2,
-                           norm_mode=MoeConfig.ExpertScaleNormalizationMode.
-                           RENORMALIZE,
-                           use_plugin=False)
-            ]
         return params
 
     def custom_name_func(testcase_func, param_num, param):
@@ -361,11 +292,9 @@ class TestFunctional(unittest.TestCase):
     @parameterized.expand(get_params(), name_func=custom_name_func)
     def test_mixture_of_experts(self, num_experts, top_k, hidden_size,
                                 num_sequences, sequence_lengths, actfn, bias,
-                                dtype_str, weight_dtype_str, norm_mode,
-                                use_plugin):
-        """ This test compares the MOE result to a simple reference implementation using torch """
+                                dtype_str, weight_dtype_str, norm_mode):
+        """ This test compares the MOE plugin result to a simple reference implementation using torch """
         dtype = tensorrt_llm.str_dtype_to_trt(dtype_str)
-
         use_int4_weights = weight_dtype_str == 'int4'
         weight_dtype = trt.int8 if use_int4_weights else tensorrt_llm.str_dtype_to_trt(
             weight_dtype_str)
@@ -399,8 +328,7 @@ class TestFunctional(unittest.TestCase):
                                dtype,
                                weight_dtype=weight_dtype,
                                quant_mode=quant_mode,
-                               norm_mode=norm_mode,
-                               use_plugin=use_plugin)['output'].float()
+                               norm_mode=norm_mode)['output'].float()
 
         ref = self.referenceImpl(input_data, top_k, actfn, weight_dtype,
                                  quant_mode, norm_mode).cpu().float()
@@ -423,18 +351,12 @@ class TestFunctional(unittest.TestCase):
     def get_mlp_params():
         params = []
         for actfn in ('gelu', 'geglu'):
-            params += [('float32', actfn, True), ('float16', actfn, True),
-                       ('bfloat16', actfn, True), ('int8', actfn, True),
-                       ('int4', actfn, True)]
-            # OOTB tests
-            # TODO: Support ootb path with getSMVersion() < 90, quantization:
-            if getSMVersion() >= 90:
-                params += [('float32', actfn, False), ('float16', actfn, False),
-                           ('bfloat16', actfn, False)]
+            params += [('float32', actfn), ('float16', actfn),
+                       ('bfloat16', actfn), ('int8', actfn), ('int4', actfn)]
         return params
 
     @parameterized.expand(get_mlp_params(), name_func=custom_name_func)
-    def test_mlp_comparison(self, dtype_str, actfn, use_plugin):
+    def test_mlp_comparison(self, dtype_str, actfn):
         """ This test uses one expert and compares the result to a plain MLP """
         if getSMVersion() < 80 and dtype_str == 'bfloat16':
             pytest.skip("Skip bf16 tests on arch < sm80")
@@ -519,8 +441,7 @@ class TestFunctional(unittest.TestCase):
                            dtype,
                            weight_dtype=weight_dtype,
                            quant_mode=quant_mode,
-                           custom_network=MLP,
-                           use_plugin=use_plugin)
+                           custom_network=MLP)
 
         tolerances = {
             'float32': 1e-2,
@@ -541,7 +462,7 @@ class TestFunctional(unittest.TestCase):
                                               2).contiguous().cpu()
             type = torch.quint4x2 if quant_mode.is_int4_weight_only(
             ) else torch.int8
-            processed_torch_weights, torch_weight_scales = torch.ops.trtllm.symmetric_quantize_last_axis_of_batched_matrix(
+            processed_torch_weights, torch_weight_scales = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
                 torch_transpose, type)
             # Change the shape to what moe expects without touching the underlying format
             weight.value = np.ascontiguousarray(
@@ -564,12 +485,9 @@ class TestFunctional(unittest.TestCase):
                 quant_mode=QuantMode(0),
                 norm_mode=MoeConfig.ExpertScaleNormalizationMode.NONE,
                 finished=None,
-                custom_network=None,
-                use_plugin=True):
+                custom_network=None):
         builder = tensorrt_llm.Builder()
         net = builder.create_network()
-        if use_plugin:
-            net.plugin_config.set_moe_plugin(dtype)
         with tensorrt_llm.net_guard(net):
             network = tensorrt_llm.default_trtnet()
             trt_key = Tensor(name='input_hidden_states',

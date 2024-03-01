@@ -59,6 +59,8 @@ public:
     size_t getSerializationSize() const noexcept override;
     void serialize(void* buffer) const noexcept override;
     void destroy() noexcept override;
+    void setPluginNamespace(const char* pluginNamespace) noexcept override;
+    const char* getPluginNamespace() const noexcept override;
 
 private:
     const std::string mLayerName;
@@ -85,6 +87,7 @@ public:
 private:
     static nvinfer1::PluginFieldCollection mFC;
     static std::vector<nvinfer1::PluginField> mPluginAttributes;
+    std::string mNamespace;
 };
 
 } // namespace tensorrt_llm::plugins

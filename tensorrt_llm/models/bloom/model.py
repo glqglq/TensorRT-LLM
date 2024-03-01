@@ -18,13 +18,12 @@ from ...functional import Tensor
 from ...layers import (MLP, Attention, AttentionMaskType, ColumnLinear,
                        Embedding, LayerNorm, PositionEmbeddingType)
 from ...module import Module
-from ..modeling_utils import (DecoderLayerList, DecoderModelForCausalLM,
-                              PretrainedConfig)
+from ..modeling_utils import DecoderLayerList, DecoderModelForCausalLM
 
 
 class BloomDecoderLayer(Module):
 
-    def __init__(self, config: PretrainedConfig, layer_idx: int):
+    def __init__(self, config, layer_idx):
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
@@ -38,10 +37,10 @@ class BloomDecoderLayer(Module):
                                          dtype=dtype)
 
         self.attention = Attention(
-            layer_idx=layer_idx,
-            hidden_size=hidden_size,
-            num_attention_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
+            hidden_size,
+            config.num_attention_heads,
+            config.num_key_value_heads,
+            max_position_embeddings=2048,
             num_layers=config.num_hidden_layers,
             dtype=dtype,
             attention_mask_type=AttentionMaskType.causal,
@@ -50,7 +49,8 @@ class BloomDecoderLayer(Module):
             tp_group=tp_group,
             tp_size=tp_size,
             tp_rank=tp_rank,
-            quant_mode=config.quant_mode)
+            quant_mode=config.quant_mode,
+            instance_id=2 * layer_idx)
 
         mlp_hidden_size = hidden_size * 4 if config.intermediate_size is None else config.intermediate_size
 
@@ -61,7 +61,8 @@ class BloomDecoderLayer(Module):
                        bias=True,
                        tp_group=tp_group,
                        tp_size=tp_size,
-                       quant_mode=config.quant_mode)
+                       quant_mode=config.quant_mode,
+                       instance_id=2 * layer_idx + 1)
         self.post_layernorm = LayerNorm(normalized_shape=hidden_size,
                                         dtype=dtype)
 
@@ -70,7 +71,8 @@ class BloomDecoderLayer(Module):
                 attention_mask=None,
                 use_cache=False,
                 kv_cache_params=None,
-                attention_params=None):
+                attention_params=None,
+                all_reduce_workspace=None):
 
         assert isinstance(hidden_states, Tensor)
 
@@ -82,7 +84,8 @@ class BloomDecoderLayer(Module):
                                           attention_mask=attention_mask,
                                           use_cache=use_cache,
                                           kv_cache_params=kv_cache_params,
-                                          attention_params=attention_params)
+                                          attention_params=attention_params,
+                                          workspace=all_reduce_workspace)
 
         if use_cache:
             attention_output, presents = attention_output
@@ -92,7 +95,7 @@ class BloomDecoderLayer(Module):
         residual = hidden_states
         hidden_states = self.post_layernorm(hidden_states)
 
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, all_reduce_workspace)
 
         hidden_states = residual + hidden_states
 
@@ -103,14 +106,14 @@ class BloomDecoderLayer(Module):
 
 class BloomModel(Module):
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config):
         super().__init__()
         dtype = config.dtype
         tp_group = config.mapping.tp_group
         tp_size = config.mapping.tp_size
         tp_rank = config.mapping.tp_rank
         if config.use_parallel_embedding:
-            self.vocab_embedding = Embedding(
+            self.embedding = Embedding(
                 config.vocab_size,
                 config.hidden_size,
                 dtype=dtype,
@@ -119,9 +122,9 @@ class BloomModel(Module):
                 sharding_dim=config.embedding_sharding_dim,
                 tp_rank=tp_rank)
         else:
-            self.vocab_embedding = Embedding(config.vocab_size,
-                                             config.hidden_size,
-                                             dtype=dtype)
+            self.embedding = Embedding(config.vocab_size,
+                                       config.hidden_size,
+                                       dtype=dtype)
         self.ln_embed = LayerNorm(normalized_shape=config.hidden_size,
                                   dtype=dtype)
         self.layers = DecoderLayerList(BloomDecoderLayer, config)
@@ -136,8 +139,9 @@ class BloomModel(Module):
                 prompt_embedding_table=None,
                 prompt_tasks=None,
                 prompt_vocab_size=None,
-                attention_params=None):
-        hidden_states = self.vocab_embedding(input_ids)
+                attention_params=None,
+                all_reduce_workspace=None):
+        hidden_states = self.embedding(input_ids, all_reduce_workspace)
 
         hidden_states = self.ln_embed(hidden_states)
 
@@ -145,7 +149,8 @@ class BloomModel(Module):
                                     use_cache=use_cache,
                                     attention_mask=attention_mask,
                                     kv_cache_params=kv_cache_params,
-                                    attention_params=attention_params)
+                                    attention_params=attention_params,
+                                    all_reduce_workspace=all_reduce_workspace)
 
         if use_cache:
             hidden_states, presents = hidden_states
@@ -159,14 +164,24 @@ class BloomModel(Module):
 
 class BloomForCausalLM(DecoderModelForCausalLM):
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config):
+        use_parallel_embedding = config.use_parallel_embedding
+        embedding_sharding_dim = config.embedding_sharding_dim
+
+        if config.share_embedding_table and config.mapping.tp_size > 1:
+            if (not use_parallel_embedding) or (use_parallel_embedding and
+                                                embedding_sharding_dim == 1):
+                raise NotImplementedError(
+                    'For multiple-processes cases, sharing the embedding table must set use_parallel_embedding=True and embedding_sharding_dim=0'
+                )
+
         transformer = BloomModel(config)
         vocab_size_padded = pad_vocab_size(config.vocab_size,
                                            config.mapping.tp_size)
 
         share_weight = None
         if config.share_embedding_table:
-            share_weight = transformer.vocab_embedding.weight
+            share_weight = transformer.embedding.weight
 
         lm_head = ColumnLinear(config.hidden_size,
                                vocab_size_padded,
@@ -178,3 +193,8 @@ class BloomForCausalLM(DecoderModelForCausalLM):
                                share_weight=share_weight)
 
         super().__init__(config, transformer, lm_head)
+
+    def check_config(self):
+        self.config.set_if_not_exist('use_parallel_embedding', False)
+        self.config.set_if_not_exist('embedding_sharding_dim', 0)
+        self.config.set_if_not_exist('share_embedding_table', False)

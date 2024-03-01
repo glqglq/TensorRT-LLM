@@ -18,12 +18,16 @@
 
 #include "tensorrt_llm/runtime/bufferManager.h"
 #include "tensorrt_llm/runtime/cudaEvent.h"
-#include "tensorrt_llm/runtime/decodingMode.h"
+#include "tensorrt_llm/runtime/cudaStream.h"
 #include "tensorrt_llm/runtime/gptDecoder.h"
 #include "tensorrt_llm/runtime/iStatefulGptDecoder.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <utility>
+#include <vector>
 
 namespace tensorrt_llm::runtime
 {
@@ -35,9 +39,8 @@ public:
     StatefulGptDecoder(std::size_t vocabSize, std::size_t vocabSizePadded, CudaStreamPtr stream);
 
     //! Setup the decoder before calling `forward()`
-    void setup(DecodingMode const& mode, SizeType maxBatchSize, SizeType maxBeamWidth, SizeType maxAttentionWindow,
-        SizeType sinkTokenLength, SizeType maxSequenceLength, SizeType maxTokensPerStep, bool fusedDecoder,
-        nvinfer1::DataType dtype) override;
+    void setup(SizeType maxBatchSize, SizeType maxBeamWidth, SizeType maxAttentionWindow, SizeType sinkTokenLength,
+        SizeType maxSequenceLength, SizeType maxTokensPerStep, nvinfer1::DataType dtype) override;
 
     //! @brief Initialize the decoder with new batch of inputs.
     void newBatch(
@@ -83,7 +86,7 @@ public:
     //! @returns [batchSize, maxBeamWidth], tokens generated in last forward pass, on gpu
     [[nodiscard]] TensorPtr getAllNewTokens() const override
     {
-        TensorPtr newTokens = ITensor::view(mDecodingOutput->newTokensSteps);
+        TensorPtr newTokens = std::move(ITensor::view(mDecodingOutput->newTokensSteps));
         newTokens->unsqueeze(0);
         return newTokens;
     }
@@ -91,7 +94,7 @@ public:
     //! @returns [1], number of finished sequences, in pinned host memory
     [[nodiscard]] TensorPtr getNbFinished() const override
     {
-        return mFinishedSum;
+        return mDecodingOutput->finishedSum;
     }
 
 private:
@@ -111,8 +114,6 @@ private:
     using DecodingOutputPtr = std::unique_ptr<DecodingOutput>;
     DecodingOutputPtr mDecodingOutput;
     CudaEvent mDecodedEvent{};
-
-    TensorPtr mFinishedSum;
 
     SizeType mNbSteps;
     SizeType mMaxSequenceLength{};

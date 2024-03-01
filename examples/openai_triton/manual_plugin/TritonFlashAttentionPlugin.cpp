@@ -16,6 +16,9 @@
  */
 #include "TritonFlashAttentionPlugin.h"
 
+#include "tensorrt_llm/plugins/common/checkMacrosPlugin.h"
+#include "tensorrt_llm/plugins/common/plugin.h"
+
 // Import a generated header to use generated triton kernels.
 extern "C"
 {
@@ -23,51 +26,19 @@ extern "C"
 #include "aot/fmha_kernel_fp32.h"
 }
 
-#include <cstring>
-#include <cuda_fp16.h>
-#include <iostream>
 #include <string>
 
 using namespace nvinfer1;
 using openai_triton::plugin::TritonFlashAttentionPluginCreator;
 using openai_triton::plugin::TritonFlashAttentionPlugin;
+using tensorrt_llm::plugins::read;
+using tensorrt_llm::plugins::write;
+using tensorrt_llm::plugins::caughtError;
 
 static const char* TRITON_FLASH_ATTENTION_PLUGIN_VERSION{"1"};
 static const char* TRITON_FLASH_ATTENTION_PLUGIN_NAME{"TritonFlashAttention"};
 PluginFieldCollection TritonFlashAttentionPluginCreator::mFC{};
 std::vector<PluginField> TritonFlashAttentionPluginCreator::mPluginAttributes;
-
-namespace openai_triton::plugin
-{
-
-// Write values into buffer
-template <typename T>
-void writeArg(char*& buffer, const T& val)
-{
-    std::memcpy(buffer, &val, sizeof(T));
-    buffer += sizeof(T);
-}
-
-// Read values from buffer
-template <typename T>
-void readArg(const char*& buffer, T& val)
-{
-    std::memcpy(&val, buffer, sizeof(T));
-    buffer += sizeof(T);
-}
-
-std::uintptr_t constexpr kCudaMemAlign = 128;
-
-int8_t* nextWorkspacePtr(int8_t* ptr, uintptr_t previousWorkspaceSize)
-{
-    uintptr_t addr = (uintptr_t) ptr;
-    addr += previousWorkspaceSize;
-    if (addr % kCudaMemAlign)
-    {
-        addr += kCudaMemAlign - addr % kCudaMemAlign;
-    }
-    return (int8_t*) addr;
-}
 
 TritonFlashAttentionPlugin::TritonFlashAttentionPlugin(
     int numHeads, int headSize, float softmaxScale, nvinfer1::DataType type)
@@ -82,11 +53,11 @@ TritonFlashAttentionPlugin::TritonFlashAttentionPlugin(
 TritonFlashAttentionPlugin::TritonFlashAttentionPlugin(const void* data, size_t length)
 {
     const char *d = reinterpret_cast<const char*>(data), *a = d;
-    readArg(d, mNumHeads);
-    readArg(d, mHeadSize);
-    readArg(d, mSoftmaxScale);
-    readArg(d, mType);
-    assert(d == a + length);
+    read(d, mNumHeads);
+    read(d, mHeadSize);
+    read(d, mSoftmaxScale);
+    read(d, mType);
+    TLLM_CHECK(d == a + length);
 }
 
 // IPluginV2DynamicExt Methods
@@ -102,7 +73,7 @@ nvinfer1::DimsExprs TritonFlashAttentionPlugin::getOutputDimensions(
 {
     // Output shape.
     //   output tensor [batchSize, seqLen, mNumHeads, head_size]
-    assert(outputIndex == 0);
+    TLLM_CHECK(outputIndex == 0);
     return inputs[outputIndex];
 }
 
@@ -110,8 +81,8 @@ bool TritonFlashAttentionPlugin::supportsFormatCombination(
     int pos, const nvinfer1::PluginTensorDesc* inOut, int nbInputs, int nbOutputs) noexcept
 {
     // In this example, inputs: Q, K, V, outputs: Out
-    assert(nbInputs + nbOutputs == 4);
-    assert(0 <= pos && pos < nbInputs + nbOutputs);
+    TLLM_CHECK(nbInputs + nbOutputs == 4);
+    TLLM_CHECK(0 <= pos && pos < nbInputs + nbOutputs);
 
     bool is_valid = false;
     if (0 <= pos && pos < 3) // Q, K, V
@@ -141,17 +112,7 @@ size_t TritonFlashAttentionPlugin::getWorkspaceSize(const nvinfer1::PluginTensor
     size_t workspaces[numBuffers];
     workspaces[0] = sizeof(float) * batchSize * mNumHeads * seqLen;
     workspaces[1] = sizeof(float) * batchSize * mNumHeads * seqLen;
-
-    size_t total = 0;
-    for (int i = 0; i < numBuffers; i++)
-    {
-        total += workspaces[i];
-        if (workspaces[i] % kCudaMemAlign)
-        {
-            total += kCudaMemAlign - (workspaces[i] % kCudaMemAlign);
-        }
-    }
-    return total;
+    return tensorrt_llm::common::calculateTotalWorkspaceSize(workspaces, numBuffers);
 }
 
 template <typename T>
@@ -159,9 +120,9 @@ int TritonFlashAttentionPlugin::enqueueImpl(const nvinfer1::PluginTensorDesc* in
     const nvinfer1::PluginTensorDesc* outputDesc, const void* const* inputs, void* const* outputs, void* workspace,
     cudaStream_t stream)
 {
-    assert(inputDesc[0].dims.d[1] == mNumHeads && inputDesc[0].dims.d[3] == mHeadSize);
-    assert(inputDesc[1].dims.d[1] == mNumHeads && inputDesc[1].dims.d[3] == mHeadSize);
-    assert(inputDesc[2].dims.d[1] == mNumHeads && inputDesc[2].dims.d[3] == mHeadSize);
+    TLLM_CHECK(inputDesc[0].dims.d[1] == mNumHeads && inputDesc[0].dims.d[3] == mHeadSize);
+    TLLM_CHECK(inputDesc[1].dims.d[1] == mNumHeads && inputDesc[1].dims.d[3] == mHeadSize);
+    TLLM_CHECK(inputDesc[2].dims.d[1] == mNumHeads && inputDesc[2].dims.d[3] == mHeadSize);
 
     int batchSize = inputDesc[0].dims.d[0];
     int seqLen = inputDesc[0].dims.d[2];
@@ -170,7 +131,7 @@ int TritonFlashAttentionPlugin::enqueueImpl(const nvinfer1::PluginTensorDesc* in
 
     const size_t bufSize = sizeof(float) * batchSize * mNumHeads * seqLen;
     float* L = reinterpret_cast<float*>(workspace);
-    float* M = reinterpret_cast<float*>(nextWorkspacePtr(reinterpret_cast<int8_t*>(L), bufSize));
+    float* M = reinterpret_cast<float*>(tensorrt_llm::common::nextWorkspacePtr(reinterpret_cast<int8_t*>(L), bufSize));
 
     const T* Q = reinterpret_cast<const T*>(inputs[0]);
     const T* K = reinterpret_cast<const T*>(inputs[1]);
@@ -212,7 +173,7 @@ int TritonFlashAttentionPlugin::enqueue(const nvinfer1::PluginTensorDesc* inputD
 nvinfer1::DataType TritonFlashAttentionPlugin::getOutputDataType(
     int index, const nvinfer1::DataType* inputTypes, int nbInputs) const noexcept
 {
-    assert(index == 0);
+    TLLM_CHECK(index == 0);
     return inputTypes[0];
 }
 
@@ -256,10 +217,10 @@ size_t TritonFlashAttentionPlugin::getSerializationSize() const noexcept
 void TritonFlashAttentionPlugin::serialize(void* buffer) const noexcept
 {
     char *d = static_cast<char*>(buffer), *a = d;
-    writeArg(d, mNumHeads);
-    writeArg(d, mHeadSize);
-    writeArg(d, mSoftmaxScale);
-    writeArg(d, mType);
+    write(d, mNumHeads);
+    write(d, mHeadSize);
+    write(d, mSoftmaxScale);
+    write(d, mType);
     assert(d == a + getSerializationSize());
 }
 
@@ -321,22 +282,22 @@ IPluginV2* TritonFlashAttentionPluginCreator::createPlugin(const char* name, con
         const char* attrName = fields[i].name;
         if (!strcmp(attrName, "num_heads"))
         {
-            assert(fields[i].type == PluginFieldType::kINT32);
+            TLLM_CHECK(fields[i].type == PluginFieldType::kINT32);
             numHeads = static_cast<int>(*(static_cast<const int*>(fields[i].data)));
         }
         else if (!strcmp(attrName, "head_size"))
         {
-            assert(fields[i].type == PluginFieldType::kINT32);
+            TLLM_CHECK(fields[i].type == PluginFieldType::kINT32);
             headSize = static_cast<int>(*(static_cast<const int*>(fields[i].data)));
         }
         else if (!strcmp(attrName, "softmax_scale"))
         {
-            assert(fields[i].type == PluginFieldType::kFLOAT32);
+            TLLM_CHECK(fields[i].type == PluginFieldType::kFLOAT32);
             softmaxScale = static_cast<float>(*(static_cast<const float*>(fields[i].data)));
         }
         else if (!strcmp(attrName, "type_id"))
         {
-            assert(fields[i].type == PluginFieldType::kINT32);
+            TLLM_CHECK(fields[i].type == PluginFieldType::kINT32);
             type = static_cast<nvinfer1::DataType>(*(static_cast<const nvinfer1::DataType*>(fields[i].data)));
         }
     }
@@ -348,7 +309,7 @@ IPluginV2* TritonFlashAttentionPluginCreator::createPlugin(const char* name, con
     }
     catch (const std::exception& e)
     {
-        std::cerr << "Caught exception: " << e.what() << std::endl;
+        caughtError(e);
     }
     return nullptr;
 }
@@ -366,7 +327,7 @@ IPluginV2* TritonFlashAttentionPluginCreator::deserializePlugin(
     }
     catch (const std::exception& e)
     {
-        std::cerr << "Caught exception: " << e.what() << std::endl;
+        caughtError(e);
     }
     return nullptr;
 }
@@ -380,5 +341,3 @@ const char* TritonFlashAttentionPluginCreator::getPluginNamespace() const noexce
 {
     return mNamespace.c_str();
 }
-
-} // namespace openai_triton::plugin

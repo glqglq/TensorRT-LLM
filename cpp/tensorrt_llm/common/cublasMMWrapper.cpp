@@ -201,15 +201,15 @@ void CublasMMWrapper::setFP32GemmConfig()
     setGemmConfig(CUDA_R_32F, CUDA_R_32F, CUDA_R_32F, CUDA_R_32F);
 }
 
-void CublasMMWrapper::setFP16GemmConfig(cudaDataType_t outputType)
+void CublasMMWrapper::setFP16GemmConfig()
 {
-    setGemmConfig(CUDA_R_16F, CUDA_R_16F, outputType, CUDA_R_32F);
+    setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
 }
 
 #ifdef ENABLE_BF16
-void CublasMMWrapper::setBF16GemmConfig(cudaDataType_t outputType)
+void CublasMMWrapper::setBF16GemmConfig()
 {
-    setGemmConfig(CUDA_R_16BF, CUDA_R_16BF, outputType, CUDA_R_32F);
+    setGemmConfig(CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_32F);
 }
 #endif
 
