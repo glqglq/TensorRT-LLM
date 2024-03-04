@@ -167,15 +167,7 @@ AllReduceStrategyType AllreducePlugin::selectImplementation(size_t messageSize, 
 int AllreducePlugin::enqueue(const nvinfer1::PluginTensorDesc* inputDesc, const nvinfer1::PluginTensorDesc* outputDesc,
     const void* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream) noexcept
 {
-    // if(mRank == 0){
-    //     sem_post(&sem_0);
-    //     sem_wait(&sem_1);
-    // } else if(mRank == 1){
-    //     sem_post(&sem_1);
-    //     sem_wait(&sem_0);
-    // } else {
-    //     return 0;
-    // }
+
     if (isBuilding())
     {
         return 0;

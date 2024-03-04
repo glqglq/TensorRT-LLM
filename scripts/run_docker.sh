@@ -1,11 +1,9 @@
-#/bin/bash
-#--device=/dev/video0
-export MY_CONTAINER="TensorRT_LLM_Luqi"
+#!/bin/bash
+MY_CONTAINER="TensorRT_LLM_Luqi_Run"
 num=`sudo docker ps -a|grep "$MY_CONTAINER"|wc -l`
 echo $num,$MY_CONTAINER
 if [ 0 -eq $num ];then
-  sudo xhost +
-  docker run  -it \
+  docker run  -itd \
 		-p 2239:22 \
 		--privileged=true \
 		--cap-add=SYS_ADMIN \
@@ -15,11 +13,11 @@ if [ 0 -eq $num ];then
     		--workdir /home \
     		--name $MY_CONTAINER \
 		--tmpfs /tmp:exec \
-    		registry.cn-hangzhou.aliyuncs.com/kristonai/tensorrt_llm:23.11 
-                /bin/bash
-else
-  sudo docker start $MY_CONTAINER
-  #sudo docker attach $MY_CONTAINER
-  sudo docker exec -w /home/ -ti $MY_CONTAINER /bin/bash
+    	        trt_luqi:240302 
+  #docker start $MY_CONTAINER
+  #docker exec -w /home/ -it $MY_CONTAINER /bin/bash
 fi
-
+#else
+sudo docker start $MY_CONTAINER
+  # sudo docker attach $MY_CONTAINER
+sudo docker exec -w /home/ -ti $MY_CONTAINER /bin/bash
